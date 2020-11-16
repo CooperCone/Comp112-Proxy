@@ -4,32 +4,18 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include <errno.h>
 #include <string.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <time.h>
+#include <errno.h>
+
+#include "dynamicArray.h"
 
 
 int createClientSock(const char *port);
 void socketError(char *funcName);
-
-/************* Socket Buffer ************/
-// TODO: Rename to Dynamic Array
-// This started as just a normal buffer,
-// but I added in automatic resizing that now
-// makes it a dynamic array.
-typedef struct DynamicArray {
-  char *buff;
-  int size, maxSize;
-} DynamicArray;
-
-int readAll(int sd, DynamicArray *buffer);
-void da_init(DynamicArray *buffer, int maxSize);
-void da_clear(DynamicArray *buffer);
-void da_term(DynamicArray *buffer);
-/**************************************/
 
 
 int main(int argc, char **argv) {
@@ -103,50 +89,3 @@ void socketError(char *funcName) {
   fprintf(stderr, "%s Error: %s\n", funcName, strerror(errno));
   fprintf(stderr, "Exiting\n");
 }
-
-
-
-
- /************ Socket Buffer ********************/
-int readAll(int sd, DynamicArray *buffer) {
-  int totalRead = 0;
-
-  for(;;) {
-    if (buffer->size + 1024 > buffer->maxSize) {
-      // resize buff
-      buffer->maxSize *= 2;
-      buffer->buff = realloc(buffer->buff, buffer->maxSize * sizeof(char));
-    }
-
-    int bytesRead = read(sd, (buffer->buff + buffer->size), 1024);
-
-    if (bytesRead == -1) {
-      socketError("Read");
-      return -1;
-    }
-
-    buffer->size += bytesRead;
-    totalRead += bytesRead;
-
-    if (bytesRead < 1024)
-      break;
-  }
-
-  return totalRead;
-}
-
-void da_init(DynamicArray *buffer, int size) {
-  buffer->buff = malloc(size * sizeof(char));
-  buffer->size = 0;
-  buffer->maxSize = size;
-}
-
-void da_clear(DynamicArray *buffer) {
-  buffer->size = 0;
-  memset(buffer->buff, 0, buffer->maxSize);
-}
-
-void da_term(DynamicArray *buffer) {
-  free(buffer->buff);
-}
-/***********************************************/
