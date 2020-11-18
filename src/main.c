@@ -12,89 +12,24 @@
 #include <time.h>
 
 #include "dynamicArray.h"
+#include "cache.h"
 
 /************** Parser Data **************/
 typedef enum {
-  GET
+  GET,
+  CONNECT
 } Method;
 
 typedef struct {
   Method method;
   char url[2048];
+  char port[8];
   char domain[128];
   int headerLength;
   bool chunkedEncoding;
   int contentLength;
 } Header;
-
 /****************************************/
-
-
-/************** Cache Data *************/
-// A better implementation of an LRU cache is to use
-// a HashTable<DoubleLL> where the LRU item is always
-// at the end of the DLL. I ran out of time, so I
-// stuck with a HashTable. I'm also doing a bunch
-// of mallocs, so it would be better to write a custom
-// pool allocator for my CacheObj's
-typedef struct CacheObj {
-  char *data;
-  time_t timeCreated;
-  int timeToLive;
-  int lastAccess;
-} CacheObj;
-
-typedef struct CacheKey {
-  char url[101];
-  char port[6];
-} CacheKey;
-
-void termCacheObj(CacheObj *record); // frees cache memory
-int isStale(CacheObj *obj);
-int cacheAccessCmp(CacheObj *a, CacheObj *b); // negative if a is older than b
-
-// These are used in the hash table, but they're specific to the cache usage
-int keyCmp(CacheKey *a, CacheKey *b); // value comparison: 1 if same, 0 if not
-unsigned long long int keyHash(CacheKey *key);
-unsigned long long int strHash(char *str);
-
-// Key value pair for cache hash table
-#define Record CacheObj
-#define Key CacheKey
-/*****************************************/
-
-
-/************** Hash Table ***************/
-typedef struct LLNode {
-  Key *key;
-  Record *record;
-  struct LLNode *next;
-} LLNode;
-
-LLNode *ll_removeAll(LLNode *node, int *nRemoved, int (*ifRemove)(Record *record), void (*termRecord)(Record *record));
-LLNode *ll_remove(LLNode *node, Key *key, int (*keyCmp)(Key *a, Key *b), void (*termRecord)(Record *record));
-
-typedef struct HashTable {
-  LLNode **table;
-  int size; // actual size of table, not how many are filled
-  int maxElem; // this is specific to the cache implementation, but I just put
-               // it here because I didn't want to have to wrap HashTable
-  int numElem;
-  unsigned long long int (*hashFun)(Key *key);
-  int (*keyCmp)(Key *a, Key *b);
-  void (*termRecord)(Record *record); // frees memory
-} HashTable;
-
-void ht_init(HashTable *table, int maxSize, unsigned long long int (*hashFun)(Key *key), int (*keyCmp)(Key *a, Key *b), void (*termRecord)(Record *record));
-void ht_term(HashTable *table); // frees memory
-void ht_insert(HashTable *table, Key *key, Record *value);
-int ht_hasKey(HashTable *table, Key *key);
-Record *ht_get(HashTable *table, Key *key);
-int ht_removeAll(HashTable *table, int (*ifRemove)(Record *record)); // remove all that satisfied "ifRemove"
-Key *ht_findMin(HashTable *table, int (*recordCmp)(Record *a, Record *b)); // recordCmp: -1 if a < b, +1 if a > b
-void ht_removeKey(HashTable *table, Key *key);
-void ht_clear(HashTable *table);
-/*******************************************/
 
 
 /************ Proxy Helpers ************/
@@ -133,14 +68,14 @@ int main(int argc, char **argv) {
       socklen_t connSize = sizeof(struct sockaddr_in);
       clientConn = accept(clientSock, (struct sockaddr*)&connAddr, &connSize);
       readAll(clientConn, &getBuff);
-    } // Initialize Client Connection
+    }
 
     Header clientHeader;
     parseHeader(&clientHeader, &getBuff);
 
     CacheKey key;
     strcpy(key.url, clientHeader.url);
-    strcpy(key.port, "80");
+    strcpy(key.port, clientHeader.port); // TODO: change to actual port the user is using
 
     // Check if the key is in the hash table
     if (ht_hasKey(&cache, &key)) {
@@ -181,13 +116,15 @@ int main(int argc, char **argv) {
     // If we get to this point, either the key wasn't in the cache, or it was stale
     // So connect to the server, and send them the request
     int serverSock;
-    if ((serverSock = createServerSock(clientHeader.domain, "80")) == -1) {
+    if ((serverSock = createServerSock(clientHeader.domain, clientHeader.port)) == -1) {
       close(clientConn);
       close(clientSock);
       return 1;
     }
     write(serverSock, getBuff.buff, getBuff.size);
     int responseSize = readAll(serverSock, &reqBuff);
+
+    printf("Read %d bytes\n", responseSize);
 
     Header serverHeader;
     parseHeader(&serverHeader, &reqBuff);
@@ -225,7 +162,7 @@ int main(int argc, char **argv) {
     { // add to cache
       CacheKey *key = malloc(sizeof(CacheKey));
       strcpy(key->url, clientHeader.url);
-      strcpy(key->port, "80");
+      strcpy(key->port, clientHeader.port);
 
       char *data = malloc(sizeof(char) * responseSize);
       strcpy(data, reqBuff.buff);
@@ -335,21 +272,39 @@ bool parseHeader(Header *outHeader, DynamicArray *buff) {
 
   char *line = strtok(copiedStr, "\r\n");
   while (line) {
-    // printf("%s\n", line);
+    printf("%s\n", line);
 
     headerLen += (strlen(line) + 2);
 
-    if (strstr(line, "GET ") != NULL) {
-      outHeader->method = GET;
+    if (strstr(line, "GET ") != NULL ||
+        strstr(line, "CONNECT ") != NULL) {
 
-      char *getUrl = line + 4;
+      bool useSSL = strstr(line, "CONNECT ") != NULL;
+      outHeader->method = useSSL ? CONNECT : GET;
+
+      char *getUrl = useSSL ? line + 8 : line + 4;
+      char *urlPortSep;
       char *urlEnd;
+      urlPortSep = strstr(getUrl, ":");
       if ((urlEnd = strstr(getUrl, " ")) == NULL) {
         free(copiedStr);
         return false;
       }
 
-      size_t urlLen = urlEnd - getUrl;
+      size_t urlLen;
+      if (urlPortSep == NULL) {
+        urlLen = urlEnd - getUrl;
+        strcpy(outHeader->port, useSSL ? "443" : "80");
+      }
+      else {
+        urlLen = urlPortSep - getUrl;
+
+        size_t portLen = urlEnd - (urlPortSep + 1);
+        memcpy(outHeader->port, urlPortSep + 1, portLen);
+        outHeader->port[portLen] = '\0';
+      }
+
+      printf("Port: %s\n", outHeader->port);
 
       memcpy(outHeader->url, getUrl, urlLen);
       outHeader->url[urlLen] = '\0';
@@ -357,7 +312,12 @@ bool parseHeader(Header *outHeader, DynamicArray *buff) {
     
     else if (strstr(line, "Host: ") != NULL) {
       char *domain = line + 6;
-      strcpy(outHeader->domain, domain);
+      char *portSep = strstr(domain, ":");
+      
+      int domainLen = portSep == NULL ? strlen(domain) : portSep - domain;
+      memcpy(outHeader->domain, domain, domainLen);
+      outHeader->domain[domainLen] = '\0';
+      printf("%s\n", outHeader->domain);
     }
 
     else if (strstr(line, "Transfer-Encoding: chunked") != NULL) {
@@ -392,183 +352,3 @@ void socketError(char *funcName) {
   fprintf(stderr, "Exiting\n");
 }
 /****************************************************/
-
-
-/************* Cache Data ***********************/
-int keyCmp(CacheKey *a, CacheKey *b) {
-  return (strcmp(a->url, b->url) == 0) && (strcmp(a->port, b->port) == 0);
-}
-
-unsigned long long int strHash(char *str) {
-  // Since I'm using an int, I know that this calculation can overflow if
-  // the string is very big, but that's okay. I'm taking the modulo anyways
-  // so I don't think it matters.
-  // Consider changing to BigInt
-  unsigned long long int hash = 7;
-  int i = 0, len = strlen(str);
-  for (i; i < len; i++) {
-    hash = hash * 31 + str[i];
-  }
-  return hash;
-}
-
-unsigned long long int keyHash(CacheKey *key) {
-  // Adding these together probably isn't the best idea
-  return strHash(key->url) + strHash(key->port);
-}
-
-void termCacheObj(CacheObj *obj) {
-  free(obj->data);
-}
-
-int isStale(CacheObj *obj) {
-  return obj->timeCreated + obj->timeToLive < time(NULL);
-}
-
-int cacheAccessCmp(CacheObj *a, CacheObj *b) {
-  if (a->lastAccess > b->lastAccess)
-    return 1;
-  else if (a->lastAccess == b->lastAccess)
-    return 0;
-  else
-    return -1;
-}
-/************************************************/
-
-
-/******************* Hash Table ******************/
-void ht_init(HashTable *table, int maxSize, unsigned long long int (*hashFun)(Key *key), int (*keyCmp)(Key *a, Key *b), void (*termRecord)(Record *record)) {
-  // TODO: multiplying by 1.5 is okay, but a better
-  // solution would be to pick the next larger prime number
-  table->size = (int)(maxSize * 1.5);
-  table->maxElem = maxSize;
-  table->numElem = 0;
-  table->table = malloc(sizeof(Record) * table->size);
-  table->hashFun = hashFun;
-  table->keyCmp = keyCmp;
-  table->termRecord = termRecord;
-  int i;
-  for (i = 0; i < table->size; i++)
-    table->table[i] = NULL;
-}
-
-// terminates hash table and frees memory
-void ht_term(HashTable *table) {
-  ht_clear(table);
-  free(table->table);
-}
-
-void ht_insert(HashTable *table, Key *key, Record *record) {
-  // Handle duplicates
-  if (ht_hasKey(table, key))
-    ht_removeKey(table, key);
-  unsigned long long int hash = table->hashFun(key);
-  int index = hash % table->size;
-  LLNode *newNode = malloc(sizeof(LLNode));
-  newNode->key = key;
-  newNode->record = record;
-  newNode->next = table->table[index];
-  table->table[index] = newNode;
-  table->numElem++;
-}
-
-int ht_hasKey(HashTable *table, Key *key) {
-  unsigned long long int hash = table->hashFun(key);
-  int index = hash % table->size;
-  LLNode *node = table->table[index];
-  while (node != NULL) {
-    if (table->keyCmp(key, node->key))
-      return 1;
-    node = node->next;
-  }
-  return 0;
-}
-
-// Must check if it has key before this,
-// otherwise you'll get NULL
-Record *ht_get(HashTable *table, Key *key) {
-  unsigned long long int hash = table->hashFun(key);
-  int index = hash % table->size;
-  LLNode *node = table->table[index];
-  while (node != NULL) {
-    if (table->keyCmp(key, node->key))
-      return node->record;
-    node = node->next;
-  }
-  return NULL;
-}
-
-int ht_removeAll(HashTable *table, int (*ifRemove)(Record *record)) {
-  int i, numRemoved = 0;
-  for (i = 0; i < table->size; i++) {
-    table->table[i] = ll_removeAll(table->table[i], &numRemoved, ifRemove, table->termRecord);
-  }
-  table->numElem -= numRemoved;
-  return numRemoved;
-}
-
-LLNode *ll_removeAll(LLNode *node, int *nRemoved, int (*ifRemove)(Record *record), void (*termRecord)(Record *record)) {
-  if (node == NULL)
-    return NULL;
-  if (ifRemove(node->record)) {
-    (*nRemoved)++;
-    LLNode *next = node->next;
-    termRecord(node->record);
-    free(node->record);
-    free(node->key);
-    free(node);
-    return ll_removeAll(next, nRemoved, ifRemove, termRecord);
-  }
-  node->next = ll_removeAll(node->next, nRemoved, ifRemove, termRecord);
-  return node;
-}
-
-Key *ht_findMin(HashTable *table, int (*recordCmp)(Record *a, Record *b)) {
-  LLNode *min = NULL;
-  int i;
-  for (i = 0; i < table->size; i++) {
-    if (min == NULL && table->table[i] != NULL) {
-      min = table->table[i];
-    }
-    LLNode *cur = table->table[i];
-    while (cur != NULL) {
-      if (recordCmp(cur->record, min->record) == -1)
-        min = cur;
-      cur = cur->next;
-    }
-  }
-  return min->key;
-}
-
-void ht_removeKey(HashTable *table, Key *key) {
-  unsigned long long int hash = table->hashFun(key);
-  int index = hash % table->size;
-  table->table[index] = ll_remove(table->table[index], key, table->keyCmp, table->termRecord);
-  table->numElem--;
-}
-
-LLNode *ll_remove(LLNode *node, Key *key, int (*keyCmp)(Key *a, Key *b), void (*termRecord)(Record *record)) {
-  if (node == NULL)
-    return node;
-  if (keyCmp(key, node->key)) {
-    LLNode *next = node->next;
-    termRecord(node->record);
-    free(node->record);
-    free(node->key);
-    free(node);
-    return next;
-  } else {
-    LLNode *new = ll_remove(node->next, key, keyCmp, termRecord);
-    node->next = new;
-    return node;
-  }
-}
-
-int clearFunc(Record *record) {
-  return 1;
-}
-
-void ht_clear(HashTable *table) {
-  ht_removeAll(table, clearFunc);
-}
-/***************************************************/

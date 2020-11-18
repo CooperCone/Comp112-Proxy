@@ -1,14 +1,15 @@
 files = src/*.c
 headerDir = -Iinclude
 libs = -lnsl
+debugFlags = -ggdb3
 
 all: proxy client
-	
+
 proxy:
-	gcc $(files) $(headerDir) $(libs) -o main
+	gcc -o main $(files) $(headerDir) $(libs) 
 
 client:
-	gcc test/client.c $(headerDir) -lnsl -o client
+	gcc -o client test/client.c $(headerDir) -lnsl 
 
 test: all
 	./test.sh
