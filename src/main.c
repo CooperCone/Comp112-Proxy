@@ -50,6 +50,10 @@ int main(int argc, char **argv) {
   // TODO: Allow multiple client connections
   int clientSock, clientConn;
 
+  // These are used to store the data that comes in from the
+  // client and server respectively
+  // There will probably need to be one associated with
+  // each client
   DynamicArray getBuff, reqBuff;
   da_init(&getBuff, 2048);
   da_init(&reqBuff, 2048);
@@ -60,23 +64,26 @@ int main(int argc, char **argv) {
   if ((clientSock = createClientSock(argv[1])) == -1)
       return 1;
 
+  // TODO: Make this an infinite loop
   int i;
-  for(i = 0; i < 1; i++) { // look for client connections forever
+  for(i = 0; i < 1; i++) {
 
     { // Initalize Client Connection
       struct sockaddr_in connAddr;
       socklen_t connSize = sizeof(struct sockaddr_in);
       clientConn = accept(clientSock, (struct sockaddr*)&connAddr, &connSize);
-      readAll(clientConn, &getBuff);
     }
 
+    // Get data from the client and parse the header
+    readAll(clientConn, &getBuff);
     Header clientHeader;
     parseHeader(&clientHeader, &getBuff);
 
+    // Create a key to see if we've already seen the page
     CacheKey key;
     strcpy(key.url, clientHeader.url);
-    strcpy(key.port, clientHeader.port); // TODO: change to actual port the user is using
-
+    strcpy(key.port, clientHeader.port);
+  
     // Check if the key is in the hash table
     if (ht_hasKey(&cache, &key)) {
       CacheObj *record = ht_get(&cache, &key);
@@ -88,7 +95,7 @@ int main(int argc, char **argv) {
       else {
         char *cur = record->data;
 
-        { // Add age to header. This is a really bad way to do this
+        { // Add age to header. This is a really bad way to do this, but it works
           for (;;) {
             char c = *cur;
             if (c == '\n') {
@@ -104,7 +111,7 @@ int main(int argc, char **argv) {
               cur++;
             }
           }
-        } // Add age to header
+        }
 
         record->lastAccess = time(NULL);
         close(clientConn);
@@ -124,8 +131,6 @@ int main(int argc, char **argv) {
     write(serverSock, getBuff.buff, getBuff.size);
     int responseSize = readAll(serverSock, &reqBuff);
 
-    printf("Read %d bytes\n", responseSize);
-
     Header serverHeader;
     parseHeader(&serverHeader, &reqBuff);
 
@@ -135,20 +140,28 @@ int main(int argc, char **argv) {
     // Right now we're only handling chunked encoding
     int start = serverHeader.headerLength;
     while (serverHeader.chunkedEncoding) {
+      // Figure out how many characters are in the chunk size
       char *endOfChunkLine = strstr(reqBuff.buff + start, "\r\n");
       int size = endOfChunkLine - (reqBuff.buff + start);
       
+      // Get the chunk size string
       char chunkSizeBuff[20];
       memcpy(chunkSizeBuff, (reqBuff.buff + start), size);
       chunkSizeBuff[size] = '\0';
 
+      // Convert the chunk size string to int. It's a hex number,
+      // so we use base 16
       int chunkSize = (int)strtol(chunkSizeBuff, NULL, 16);
 
+      // This means there are no more chunks, so we read all the data
       if (chunkSize == 0)
         break;
 
+      // Add 2 for the \r\n
       start += 2 + size;
 
+      // While the amount of bytes that we've read in the chunk
+      // is less than the size of the chunk, read more data
       while (reqBuff.size - start < chunkSize) {
         int bytesRead = readAll(serverSock, &reqBuff);
         if (bytesRead == -1) {
@@ -156,6 +169,8 @@ int main(int argc, char **argv) {
         }
         responseSize += bytesRead;
       }
+
+      // There's a blank line between chunks
       start += chunkSize + 2;
     }    
   
@@ -182,13 +197,17 @@ int main(int argc, char **argv) {
       }
       ht_insert(&cache, key, obj);
     }
+
+    // Write the final data to the client and close
+    // sockets
     write(clientConn, reqBuff.buff, reqBuff.size);
     close(serverSock);
     close(clientConn);
+
     da_clear(&getBuff);
     da_clear(&reqBuff);
   }
-
+  
   // terminate buffers and free memory
   da_term(&reqBuff);
   da_term(&getBuff);
@@ -262,6 +281,7 @@ int createServerSock(char *domain, char *port) {
   return serverSock;
 }
 
+// TODO: add content-length header
 bool parseHeader(Header *outHeader, DynamicArray *buff) {
   outHeader->contentLength = -1;
   outHeader->chunkedEncoding = false;

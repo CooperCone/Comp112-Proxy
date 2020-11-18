@@ -1,0 +1,16 @@
+I finished the connect header parsing to get https to work, but for 
+some other reason, https requests aren't working yet. I'll take a look
+at why sometime tomorrow.
+
+Other than that, I also finished a few other header fields to get
+http/1.1 to work, so most http websites will work now.
+
+The next step probably is to get multiple connections working at the same time.
+
+I'm using a makefile to build it. You can run make test to execute the test
+script. Right now it has two tests in it, the first is to an http website,
+and the other is to an https website. The https is commented out though.
+
+There's another executable for a client, but I was using that to test it
+right in the beginning. It doesn't do anything as of now. Let me know
+if you have any questions.
