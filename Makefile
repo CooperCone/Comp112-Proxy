@@ -10,8 +10,8 @@ proxy:
 client:
 	gcc test/client.c $(headerDir) -lnsl -o client
 
-run: all
-	./main
+test: all
+	./test.sh
 
 clean:
 	rm main

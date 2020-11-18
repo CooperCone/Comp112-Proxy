@@ -34,7 +34,7 @@ int readAll(int sd, DynamicArray *buffer) {
     int bytesRead = read(sd, (buffer->buff + buffer->size), 1024);
 
     if (bytesRead == -1) {
-      fprintf(stderr, "Read Error: %s\n", strerror(errno));
+      // fprintf(stderr, "Read Error: %s\n", strerror(errno));
       return -1;
     }
 
