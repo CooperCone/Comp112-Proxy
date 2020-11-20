@@ -261,6 +261,7 @@ int createServerSock(char *domain, char *port) {
 
   int serverSock;
   int status;
+
   if ((status = getaddrinfo(domain, port, &hints, &serverInfo)) != 0)
     fprintf(stderr, "Addr Error: %s\n", gai_strerror(status));
 
@@ -305,7 +306,7 @@ bool parseHeader(Header *outHeader, DynamicArray *buff) {
       char *getUrl = useSSL ? line + 8 : line + 4;
       char *urlPortSep;
       char *urlEnd;
-      urlPortSep = strstr(getUrl, ":");
+      urlPortSep = strstr(strstr(getUrl, ":") + 1, ":"); // Second occurence
       if ((urlEnd = strstr(getUrl, " ")) == NULL) {
         free(copiedStr);
         return false;
