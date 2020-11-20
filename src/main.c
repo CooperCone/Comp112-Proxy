@@ -58,12 +58,14 @@ int main(int argc, char** argv) {
   if ((clientSock = createClientSock(argv[1])) == -1)
     return 1;
 
+  // Create epoll instance
   epollfd = epoll_create1(0);
   if (epollfd == -1) {
     fprintf(stderr, "Error on epoll_create1()\n");
     exit(EXIT_FAILURE);
   }
 
+  // Register clientSock to the epoll instance
   ev.events = EPOLLIN;
   ev.data.fd = clientSock;
   if (epoll_ctl(epollfd, EPOLL_CTL_ADD, clientSock, &ev) == -1) {
@@ -73,6 +75,7 @@ int main(int argc, char** argv) {
 
   for (lc = 0; lc < LOOP_SIZE; ++lc) {
     // printf("LC: %d\n", lc);
+    // Blocking wait, waits for events to happen
     nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
     if (nfds == -1) {
       fprintf(stderr, "Error on epoll_wait()\n");
@@ -91,15 +94,19 @@ int main(int argc, char** argv) {
           exit(EXIT_FAILURE);
         }
 
-        // Set non-block
-        if (fcntl(clientConn, F_SETFL, fcntl(clientConn, F_GETFL, 0) | O_NONBLOCK) == -1) {
+        // Set the clientConn as a non-block socket. This is necessary, since
+        // the clientConn socket would be registered to the epoll instance as
+        // edge-triggered (i.e. EPOLLET)
+        if (fcntl(clientConn, F_SETFL, fcntl(clientConn, F_GETFL, 0) | O_NONBLOCK) == -1)
+        {
           fprintf(stderr, "Error on fcntl()\n");
         }
 
+        // Register the clientConn socket to the epoll instance
         ev.events = EPOLLIN | EPOLLET;
         ev.data.fd = clientConn;
-
-        if (epoll_ctl(epollfd, EPOLL_CTL_ADD, clientConn, &ev) == -1) {
+        if (epoll_ctl(epollfd, EPOLL_CTL_ADD, clientConn, &ev) == -1)
+        {
           fprintf(stderr, "Error on epoll_ctl() on clientConn\n");
         }
       } else {
@@ -347,7 +354,7 @@ int main(int argc, char** argv) {
 
         da_clear(&getBuff);
         da_clear(&reqBuff);
-      }
+      } // if (events[n].data.fd != clientSock)
     }
   }
 
