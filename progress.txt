@@ -1,3 +1,5 @@
+-- CooperCone
+
 I finished the connect header parsing to get https to work, but for 
 some other reason, https requests aren't working yet. I'll take a look
 at why sometime tomorrow.
@@ -14,3 +16,18 @@ and the other is to an https website. The https is commented out though.
 There's another executable for a client, but I was using that to test it
 right in the beginning. It doesn't do anything as of now. Let me know
 if you have any questions.
+
+-- ercprk (Nov 19th 22:49)
+
+parseHeader() wasn't parsing the port correctly so I fixed that.
+
+I made it so that the server can handle multiple clients. This was done through
+the epoll API. I didn't change any of the program flow for handling a request
+from a client; I simply ported them into a loop where it handles detection
+from clients through the epoll instance. I used poll initially but learned that
+epoll is quicker and has similar API.
+
+All the changes were done in main(), except one line in parseHeader(). Macros
+were added for MAX_EVENTS (for the max number of client requests to handle at a
+time) and LOOP_SIZE (the outermost loop, should theoretically infinite, but for
+developing purposes we can limit)

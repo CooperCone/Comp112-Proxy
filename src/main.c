@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/epoll.h>
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
@@ -10,6 +11,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <time.h>
+#include <fcntl.h>
 
 #include "dynamicArray.h"
 #include "cache.h"
@@ -39,11 +41,19 @@ bool parseHeader(Header *outHeader, DynamicArray *buff);
 void socketError(char *funcName);
 /******************************************/
 
+#define MAX_EVENTS 100 // For epoll_wait()
+#define LOOP_SIZE 4 // Should be infinite theoretically, but this is for testing
 
 int main(int argc, char **argv) {
+  int epollfd;
+  struct epoll_event ev;                 // epoll_ctl()
+  struct epoll_event events[MAX_EVENTS]; // epoll_wait()
+  int lc; // loop counter
+  int n, nfds;
+
   if (argc != 2) {
     fprintf(stderr, "Invalid arguments!\n");
-    fprintf(stderr, "Try: ./a.out <Port_Number>");
+    fprintf(stderr, "Try: %s <Port_Number>\n", argv[0]);
     return 1;
   }
 
@@ -64,8 +74,191 @@ int main(int argc, char **argv) {
   if ((clientSock = createClientSock(argv[1])) == -1)
       return 1;
 
+  epollfd = epoll_create1(0);
+  if (epollfd == -1) {
+    fprintf(stderr, "Error on epoll_create1()\n");
+    exit(EXIT_FAILURE);
+  }
+
+  ev.events = EPOLLIN;
+  ev.data.fd = clientSock;
+  if (epoll_ctl(epollfd, EPOLL_CTL_ADD, clientSock, &ev) == -1) {
+    fprintf(stderr, "Error on epoll_ctl() on clientSock\n");
+    exit(EXIT_FAILURE);
+  }
+
+  for (lc = 0; lc < LOOP_SIZE; ++lc) {
+    nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
+    if (nfds == -1) {
+      fprintf(stderr, "Error on epoll_wait()\n");
+      exit(EXIT_FAILURE);
+    }
+
+    for (n = 0; n < nfds; ++n) {
+      if (events[n].data.fd == clientSock) {
+        // Initialize Client Connection
+        struct sockaddr_in connAddr;
+        socklen_t connSize = sizeof(struct sockaddr_in);
+        clientConn = accept(clientSock, (struct sockaddr *)&connAddr,
+                            &connSize);
+        if (clientConn == -1)
+        {
+          fprintf(stderr, "Error on accept()\n");
+          exit(EXIT_FAILURE);
+        }
+
+        // Set non-block
+        if (fcntl(clientConn, F_SETFL, fcntl(clientConn, F_GETFL, 0) | O_NONBLOCK) == -1)
+        {
+          fprintf(stderr, "Error on fcntl()\n");
+        }
+
+        ev.events = EPOLLIN | EPOLLET;
+        ev.data.fd = clientConn;
+
+        if (epoll_ctl(epollfd, EPOLL_CTL_ADD, clientConn, &ev) == -1)
+        {
+          fprintf(stderr, "Error on epoll_ctl() on clientConn\n");
+        }
+      } else {
+        clientConn = events[n].data.fd;
+
+        // Get data from the client and parse the header
+        readAll(clientConn, &getBuff);
+        Header clientHeader;
+        parseHeader(&clientHeader, &getBuff);
+
+        // Create a key to see if we've already seen the page
+        CacheKey key;
+        strcpy(key.url, clientHeader.url);
+        strcpy(key.port, clientHeader.port);
+
+        // Check if the key is in the hash table
+        if (ht_hasKey(&cache, &key)) {
+          CacheObj *record = ht_get(&cache, &key);
+
+          // Check if stale
+          if (record->timeCreated + record->timeToLive < time(NULL)) {
+            ht_removeKey(&cache, &key);
+          } else {
+            char *cur = record->data;
+
+            { // Add age to header. This is a really bad way to do this, but it works
+              for (;;) {
+                char c = *cur;
+                if (c == '\n') {
+                  char txt[40];
+                  sprintf(txt, "\nAge: %d\r\n", (int)time(NULL) - (int)record->timeCreated);
+                  write(clientConn, txt, strlen(txt));
+                  cur++;
+                  write(clientConn, cur, strlen(cur));
+                  break;
+                } else {
+                  write(clientConn, &c, 1);
+                  cur++;
+                }
+              }
+            }
+
+            record->lastAccess = time(NULL);
+            close(clientConn);
+            da_clear(&getBuff);
+            continue;
+          }
+        }
+
+        // If we get to this point, either the key wasn't in the cache, or it was stale
+        // So connect to the server, and send them the request
+        int serverSock;
+        if ((serverSock = createServerSock(clientHeader.domain, clientHeader.port)) == -1) {
+          close(clientConn);
+          close(clientSock);
+          return 1;
+        }
+        write(serverSock, getBuff.buff, getBuff.size);
+        int responseSize = readAll(serverSock, &reqBuff);
+
+        Header serverHeader;
+        parseHeader(&serverHeader, &reqBuff);
+
+        // A couple things could happen here.
+        // If content length set, then just read content length
+        // If chunked encoding, find chunk size and read chunks
+        // Right now we're only handling chunked encoding
+        int start = serverHeader.headerLength;
+        while (serverHeader.chunkedEncoding) {
+          // Figure out how many characters are in the chunk size
+          char *endOfChunkLine = strstr(reqBuff.buff + start, "\r\n");
+          int size = endOfChunkLine - (reqBuff.buff + start);
+
+          // Get the chunk size string
+          char chunkSizeBuff[20];
+          memcpy(chunkSizeBuff, (reqBuff.buff + start), size);
+          chunkSizeBuff[size] = '\0';
+
+          // Convert the chunk size string to int. It's a hex number,
+          // so we use base 16
+          int chunkSize = (int)strtol(chunkSizeBuff, NULL, 16);
+
+          // This means there are no more chunks, so we read all the data
+          if (chunkSize == 0)
+            break;
+
+          // Add 2 for the \r\n
+          start += 2 + size;
+
+          // While the amount of bytes that we've read in the chunk
+          // is less than the size of the chunk, read more data
+          while (reqBuff.size - start < chunkSize) {
+            int bytesRead = readAll(serverSock, &reqBuff);
+            if (bytesRead == -1) {
+              break;
+            }
+            responseSize += bytesRead;
+          }
+
+          // There's a blank line between chunks
+          start += chunkSize + 2;
+        }
+
+        { // add to cache
+          CacheKey *key = malloc(sizeof(CacheKey));
+          strcpy(key->url, clientHeader.url);
+          strcpy(key->port, clientHeader.port);
+
+          char *data = malloc(sizeof(char) * responseSize);
+          strcpy(data, reqBuff.buff);
+
+          CacheObj *obj = malloc(sizeof(CacheObj));
+          obj->data = data;
+          obj->timeCreated = time(NULL);
+          obj->timeToLive = 60; // TODO: Change this to real time to live
+          obj->lastAccess = -1;
+
+          if (cache.numElem >= cache.maxElem) {
+            int numRemoved = ht_removeAll(&cache, isStale);
+              if (cache.numElem >= cache.maxElem) {
+                CacheKey *minKey = ht_findMin(&cache, cacheAccessCmp);
+                ht_removeKey(&cache, minKey);
+              }
+          }
+          ht_insert(&cache, key, obj);
+        }
+
+        // Write the final data to the client and close
+        // sockets
+        write(clientConn, reqBuff.buff, reqBuff.size);
+        close(serverSock);
+        close(clientConn);
+
+        da_clear(&getBuff);
+        da_clear(&reqBuff);
+      }
+    }
+  }
+
   // TODO: Make this an infinite loop
-  int i;
+  /*int i;
   for(i = 0; i < 1; i++) {
 
     { // Initalize Client Connection
@@ -206,12 +399,13 @@ int main(int argc, char **argv) {
 
     da_clear(&getBuff);
     da_clear(&reqBuff);
-  }
+  }*/
   
   // terminate buffers and free memory
   da_term(&reqBuff);
   da_term(&getBuff);
   close(clientSock);
+  close(epollfd);
   return 0;
 }
 
