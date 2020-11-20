@@ -1,46 +1,29 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdbool.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#include <arpa/inet.h>
 #include <errno.h>
-#include <string.h>
 #include <netdb.h>
 #include <netinet/in.h>
-#include <arpa/inet.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/types.h>
 #include <time.h>
+#include <unistd.h>
 
-#include "dynamicArray.h"
 #include "cache.h"
-
-/************** Parser Data **************/
-typedef enum {
-  GET,
-  CONNECT
-} Method;
-
-typedef struct {
-  Method method;
-  char url[2048];
-  char port[8];
-  char domain[128];
-  int headerLength;
-  bool chunkedEncoding;
-  int contentLength;
-} Header;
-/****************************************/
-
+#include "dynamicArray.h"
+#include "httpData.h"
 
 /************ Proxy Helpers ************/
-int createClientSock(const char *port);
-int createServerSock(char *domain, char *port);
-bool parseHeader(Header *outHeader, DynamicArray *buff);
-void socketError(char *funcName);
+int createClientSock(const char* port);
+int createServerSock(char* domain, char* port);
+bool parseHeader(Header* outHeader, DynamicArray* buff);
+int readBody(int sock, Header* header, DynamicArray* buffer);
+void socketError(char* funcName);
 /******************************************/
 
-
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
   if (argc != 2) {
     fprintf(stderr, "Invalid arguments!\n");
     fprintf(stderr, "Try: ./a.out <Port_Number>");
@@ -62,13 +45,13 @@ int main(int argc, char **argv) {
   ht_init(&cache, 10, keyHash, keyCmp, termCacheObj);
 
   if ((clientSock = createClientSock(argv[1])) == -1)
-      return 1;
+    return 1;
 
   // TODO: Make this an infinite loop
-  int i;
-  for(i = 0; i < 1; i++) {
-
-    { // Initalize Client Connection
+  // int i;
+  // for (i = 0; i < 1; i++) {
+  for (;;) {
+    {  // Initalize Client Connection
       struct sockaddr_in connAddr;
       socklen_t connSize = sizeof(struct sockaddr_in);
       clientConn = accept(clientSock, (struct sockaddr*)&connAddr, &connSize);
@@ -76,138 +59,89 @@ int main(int argc, char **argv) {
 
     // Get data from the client and parse the header
     readAll(clientConn, &getBuff);
+
+    write(1, getBuff.buff, getBuff.size);
+
     Header clientHeader;
     parseHeader(&clientHeader, &getBuff);
 
-    // Create a key to see if we've already seen the page
-    CacheKey key;
-    strcpy(key.url, clientHeader.url);
-    strcpy(key.port, clientHeader.port);
-  
-    // Check if the key is in the hash table
-    if (ht_hasKey(&cache, &key)) {
-      CacheObj *record = ht_get(&cache, &key);
+    printf("Header Size: %d - Buff Size: %d\n", clientHeader.headerLength, getBuff.size);
 
-      // Check if stale
-      if (record->timeCreated + record->timeToLive < time(NULL)) {
-        ht_removeKey(&cache, &key);
-      }
-      else {
-        char *cur = record->data;
+    // Check to see if record is cached
+    // TODO: Make sure that caching actually works
+    CacheObj* record = cache_get(&clientHeader, &cache);
+    if (record != NULL) {
+      char* cur = record->data;
+      write(clientConn, cur, strlen(cur));  // TODO: probably should know the size instead of strlen
+      // TOOD: Figure out a way to add the age to the header
+      // The old way didn't work because it's possible that we get a header from a
+      // website with the age header already filled in
 
-        { // Add age to header. This is a really bad way to do this, but it works
-          for (;;) {
-            char c = *cur;
-            if (c == '\n') {
-              char txt[40];
-              sprintf(txt, "\nAge: %d\r\n", (int)time(NULL) - (int)record->timeCreated);
-              write(clientConn, txt, strlen(txt));
-              cur++;
-              write(clientConn, cur, strlen(cur));
-              break;
-            }
-            else {
-              write(clientConn, &c, 1);
-              cur++;
-            }
-          }
-        }
-
-        record->lastAccess = time(NULL);
-        close(clientConn);
-        da_clear(&getBuff);
-        continue;
-      }
+      record->lastAccess = time(NULL);
+      close(clientConn);
+      da_clear(&getBuff);
+      continue;
     }
 
     // If we get to this point, either the key wasn't in the cache, or it was stale
     // So connect to the server, and send them the request
     int serverSock;
     if ((serverSock = createServerSock(clientHeader.domain, clientHeader.port)) == -1) {
-      close(clientConn);
-      close(clientSock);
-      return 1;
+      close(clientConn);  // TODO: Handle this error better
+      continue;
     }
-    write(serverSock, getBuff.buff, getBuff.size);
-    int responseSize = readAll(serverSock, &reqBuff);
 
-    Header serverHeader;
-    parseHeader(&serverHeader, &reqBuff);
+    // Connection successful
+    // TODO: Maybe refactor this?
+    switch (clientHeader.method) {
+      case GET: {
+        write(serverSock, getBuff.buff, getBuff.size);
+        int servBytesRead = readAll(serverSock, &reqBuff);
 
-    // A couple things could happen here.
-    // If content length set, then just read content length
-    // If chunked encoding, find chunk size and read chunks
-    // Right now we're only handling chunked encoding
-    int start = serverHeader.headerLength;
-    while (serverHeader.chunkedEncoding) {
-      // Figure out how many characters are in the chunk size
-      char *endOfChunkLine = strstr(reqBuff.buff + start, "\r\n");
-      int size = endOfChunkLine - (reqBuff.buff + start);
-      
-      // Get the chunk size string
-      char chunkSizeBuff[20];
-      memcpy(chunkSizeBuff, (reqBuff.buff + start), size);
-      chunkSizeBuff[size] = '\0';
+        printf("\nRead %d bytes from server\n", servBytesRead);
 
-      // Convert the chunk size string to int. It's a hex number,
-      // so we use base 16
-      int chunkSize = (int)strtol(chunkSizeBuff, NULL, 16);
+        Header serverHeader;
+        parseHeader(&serverHeader, &reqBuff);
 
-      // This means there are no more chunks, so we read all the data
-      if (chunkSize == 0)
+        int responseSize = serverHeader.headerLength;
+        responseSize += readBody(serverSock, &serverHeader, &reqBuff);
+
+        clientHeader.timeToLive = 60;
+        cache_add(&clientHeader, &serverHeader, responseSize, &reqBuff, &cache);
+
+        write(clientConn, reqBuff.buff, reqBuff.size);
         break;
-
-      // Add 2 for the \r\n
-      start += 2 + size;
-
-      // While the amount of bytes that we've read in the chunk
-      // is less than the size of the chunk, read more data
-      while (reqBuff.size - start < chunkSize) {
-        int bytesRead = readAll(serverSock, &reqBuff);
-        if (bytesRead == -1) {
-          break;
-        }
-        responseSize += bytesRead;
       }
+      case CONNECT: {
+        // char ok[] = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n";
+        // write(clientConn, ok, strlen(ok));
+        // da_clear(&getBuff);
 
-      // There's a blank line between chunks
-      start += chunkSize + 2;
-    }    
-  
-    { // add to cache
-      CacheKey *key = malloc(sizeof(CacheKey));
-      strcpy(key->url, clientHeader.url);
-      strcpy(key->port, clientHeader.port);
+        // while (true) {
+        //   int bytesRead = readAll(clientConn, &getBuff);
+        //   if (bytesRead <= 0)
+        //     break;
 
-      char *data = malloc(sizeof(char) * responseSize);
-      strcpy(data, reqBuff.buff);
+        //   write(serverSock, getBuff.buff, getBuff.size);
 
-      CacheObj *obj = malloc(sizeof(CacheObj));
-      obj->data = data;
-      obj->timeCreated = time(NULL);
-      obj->timeToLive = 60; // TODO: Change this to real time to live
-      obj->lastAccess = -1;
+        //   int servRead = readAll(serverSock, &reqBuff);
+        //   if (servRead <= 0)
+        //     break;
 
-      if (cache.numElem >= cache.maxElem) {
-        int numRemoved = ht_removeAll(&cache, isStale);
-        if (cache.numElem >= cache.maxElem) {
-          CacheKey *minKey = ht_findMin(&cache, cacheAccessCmp);
-          ht_removeKey(&cache, minKey);
-        }
+        //   write(clientConn, reqBuff.buff, reqBuff.size);
+        //   da_clear(&getBuff);
+        //   da_clear(&reqBuff);
+        // }
       }
-      ht_insert(&cache, key, obj);
     }
 
-    // Write the final data to the client and close
-    // sockets
-    write(clientConn, reqBuff.buff, reqBuff.size);
     close(serverSock);
     close(clientConn);
 
     da_clear(&getBuff);
     da_clear(&reqBuff);
   }
-  
+
   // terminate buffers and free memory
   da_term(&reqBuff);
   da_term(&getBuff);
@@ -215,43 +149,42 @@ int main(int argc, char **argv) {
   return 0;
 }
 
-
 /************ Proxy Helpers ****************/
-int createClientSock(const char *port) {
-    struct addrinfo hints, *proxyAddr;
+int createClientSock(const char* port) {
+  struct addrinfo hints, *proxyAddr;
 
-    memset(&hints, 0, sizeof(struct sockaddr_in));
-    hints.ai_flags = AI_PASSIVE;
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
+  memset(&hints, 0, sizeof(struct sockaddr_in));
+  hints.ai_flags = AI_PASSIVE;
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
 
-    getaddrinfo(NULL, port, &hints, &proxyAddr);
+  getaddrinfo(NULL, port, &hints, &proxyAddr);
 
-    int clientSock;
-    if ((clientSock = socket(proxyAddr->ai_family, proxyAddr->ai_socktype, 0)) == -1) {
-      socketError("Socket");
-      return -1;
-    }
-    int option = 1;
-    setsockopt(clientSock, SOL_SOCKET, SO_REUSEADDR, &option, sizeof(option));
+  int clientSock;
+  if ((clientSock = socket(proxyAddr->ai_family, proxyAddr->ai_socktype, 0)) == -1) {
+    socketError("Socket");
+    return -1;
+  }
+  int option = 1;
+  setsockopt(clientSock, SOL_SOCKET, SO_REUSEADDR, &option, sizeof(option));
 
-    if (bind(clientSock, proxyAddr->ai_addr, proxyAddr->ai_addrlen) == -1) {
-      socketError("Bind");
-      close(clientSock);
-      return -1;
-    }
+  if (bind(clientSock, proxyAddr->ai_addr, proxyAddr->ai_addrlen) == -1) {
+    socketError("Bind");
+    close(clientSock);
+    return -1;
+  }
 
-    if (listen(clientSock, 5) == -1) {
-      socketError("Listen");
-      close(clientSock);
-      return -1;
-    }
+  if (listen(clientSock, 5) == -1) {
+    socketError("Listen");
+    close(clientSock);
+    return -1;
+  }
 
-    freeaddrinfo(proxyAddr);
-    return clientSock;
+  freeaddrinfo(proxyAddr);
+  return clientSock;
 }
 
-int createServerSock(char *domain, char *port) {
+int createServerSock(char* domain, char* port) {
   struct addrinfo hints, *serverInfo;
 
   memset(&hints, 0, sizeof(struct sockaddr_in));
@@ -282,30 +215,30 @@ int createServerSock(char *domain, char *port) {
 }
 
 // TODO: add content-length header
-bool parseHeader(Header *outHeader, DynamicArray *buff) {
+bool parseHeader(Header* outHeader, DynamicArray* buff) {
   outHeader->contentLength = -1;
   outHeader->chunkedEncoding = false;
   int headerLen = 0;
 
-  char *copiedStr = malloc(buff->size);
+  char* copiedStr = malloc(buff->size);
   memcpy(copiedStr, buff->buff, buff->size);
 
-  char *line = strtok(copiedStr, "\r\n");
+  char* line = strtok(copiedStr, "\r\n");
   while (line) {
-    printf("%s\n", line);
+    // printf("Line: %s\n", line);
 
     headerLen += (strlen(line) + 2);
 
     if (strstr(line, "GET ") != NULL ||
         strstr(line, "CONNECT ") != NULL) {
-
       bool useSSL = strstr(line, "CONNECT ") != NULL;
       outHeader->method = useSSL ? CONNECT : GET;
 
-      char *getUrl = useSSL ? line + 8 : line + 4;
-      char *urlPortSep;
-      char *urlEnd;
+      char* getUrl = useSSL ? line + 8 : line + 4;
+      char* urlPortSep;
+      char* urlEnd;
       urlPortSep = strstr(getUrl, ":");
+      urlPortSep = strstr(urlPortSep + 1, ":");
       if ((urlEnd = strstr(getUrl, " ")) == NULL) {
         free(copiedStr);
         return false;
@@ -315,8 +248,7 @@ bool parseHeader(Header *outHeader, DynamicArray *buff) {
       if (urlPortSep == NULL) {
         urlLen = urlEnd - getUrl;
         strcpy(outHeader->port, useSSL ? "443" : "80");
-      }
-      else {
+      } else {
         urlLen = urlPortSep - getUrl;
 
         size_t portLen = urlEnd - (urlPortSep + 1);
@@ -328,16 +260,16 @@ bool parseHeader(Header *outHeader, DynamicArray *buff) {
 
       memcpy(outHeader->url, getUrl, urlLen);
       outHeader->url[urlLen] = '\0';
-    } 
-    
+    }
+
     else if (strstr(line, "Host: ") != NULL) {
-      char *domain = line + 6;
-      char *portSep = strstr(domain, ":");
-      
+      char* domain = line + 6;
+      char* portSep = strstr(domain, ":");
+
       int domainLen = portSep == NULL ? strlen(domain) : portSep - domain;
       memcpy(outHeader->domain, domain, domainLen);
       outHeader->domain[domainLen] = '\0';
-      printf("%s\n", outHeader->domain);
+      printf("Domain: %s\n", outHeader->domain);
     }
 
     else if (strstr(line, "Transfer-Encoding: chunked") != NULL) {
@@ -349,11 +281,11 @@ bool parseHeader(Header *outHeader, DynamicArray *buff) {
       free(copiedStr);
       return true;
     }
-    
+
     else if (strlen(line) <= 1) {
       outHeader->headerLength = headerLen + 2;
       free(copiedStr);
-      return true; // reached header end
+      return true;  // reached header end
     }
 
     // else
@@ -361,13 +293,61 @@ bool parseHeader(Header *outHeader, DynamicArray *buff) {
 
     line = strtok(NULL, "\r\n");
   }
+
+  outHeader->headerLength = headerLen;
   free(copiedStr);
   return true;
 }
 
+int readBody(int sock, Header* header, DynamicArray* buffer) {
+  // A couple things could happen here.
+  // If content length set, then just read content length
+  // If chunked encoding, find chunk size and read chunks
+  // Right now we're only handling chunked encoding
+  int bodySize = 0;
+
+  int start = header->headerLength;
+  while (header->chunkedEncoding) {
+    // Figure out how many characters are in the chunk size
+    char* endOfChunkLine = strstr(buffer->buff + start, "\r\n");
+    int size = endOfChunkLine - (buffer->buff + start);
+
+    // Get the chunk size string
+    char chunkSizeBuff[20];
+    memcpy(chunkSizeBuff, (buffer->buff + start), size);
+    chunkSizeBuff[size] = '\0';
+
+    // Convert the chunk size string to int. It's a hex number,
+    // so we use base 16
+    int chunkSize = (int)strtol(chunkSizeBuff, NULL, 16);
+
+    bodySize += 2 + chunkSize + 2 + size;
+
+    // This means there are no more chunks, so we read all the data
+    if (chunkSize == 0)
+      break;
+
+    // Add 2 for the \r\n
+    start += 2 + size;
+
+    // While the amount of bytes that we've read in the chunk
+    // is less than the size of the chunk, read more data
+    while (buffer->size - start < chunkSize) {
+      int bytesRead = readAll(sock, buffer);
+      if (bytesRead == -1) {
+        break;
+      }
+    }
+
+    // There's a blank line between chunks
+    start += chunkSize + 2;
+  }
+  return bodySize + 2;  // TODO: Check if this is correct
+}
+
 // TODO: add in variadic arg for sd's to close.
 // This will make it much easier to exit.
-void socketError(char *funcName) {
+void socketError(char* funcName) {
   fprintf(stderr, "%s Error: %s\n", funcName, strerror(errno));
   fprintf(stderr, "Exiting\n");
 }
