@@ -1,6 +1,13 @@
 #pragma once
 
 #include <time.h>
+#include <stdbool.h>
+
+#include "httpData.h"
+#include "dynamicArray.h"
+
+// Forward declaration
+typedef struct HashTable HashTable;
 
 // A better implementation of an LRU cache is to use
 // a HashTable<DoubleLL> where the LRU item is always
@@ -13,6 +20,7 @@ typedef struct CacheObj {
   time_t timeCreated;
   int timeToLive;
   int lastAccess;
+  int headerSize;
 } CacheObj;
 
 typedef struct CacheKey {
@@ -20,6 +28,11 @@ typedef struct CacheKey {
   char port[6];
 } CacheKey;
 
+// Cache Methods
+void cache_add(Header *clientHeader, Header *servHeader, int dataSize, DynamicArray *buff, HashTable *cache);
+CacheObj *cache_get(Header *clientHeader, HashTable *cache);
+
+// Cache object and key helpers
 void termCacheObj(CacheObj *record); // frees cache memory
 int isStale(CacheObj *obj);
 int cacheAccessCmp(CacheObj *a, CacheObj *b); // negative if a is older than b
