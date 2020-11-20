@@ -140,45 +140,6 @@ int main(int argc, char** argv) {
           continue;
         }
 
-        // // Create a key to see if we've already seen the page
-        // CacheKey key;
-        // strcpy(key.url, clientHeader.url);
-        // strcpy(key.port, clientHeader.port);
-
-        // Check if the key is in the hash table
-        // if (ht_hasKey(&cache, &key)) {
-        //   CacheObj* record = ht_get(&cache, &key);
-
-        //   // Check if stale
-        //   if (record->timeCreated + record->timeToLive < time(NULL)) {
-        //     ht_removeKey(&cache, &key);
-        //   } else {
-        //     char* cur = record->data;
-
-        //     {  // Add age to header. This is a really bad way to do this, but it works
-        //       for (;;) {
-        //         char c = *cur;
-        //         if (c == '\n') {
-        //           char txt[40];
-        //           sprintf(txt, "\nAge: %d\r\n", (int)time(NULL) - (int)record->timeCreated);
-        //           write(clientConn, txt, strlen(txt));
-        //           cur++;
-        //           write(clientConn, cur, strlen(cur));
-        //           break;
-        //         } else {
-        //           write(clientConn, &c, 1);
-        //           cur++;
-        //         }
-        //       }
-        //     }
-
-        //     record->lastAccess = time(NULL);
-        //     close(clientConn);
-        //     da_clear(&getBuff);
-        //     continue;
-        //   }
-        // }
-
         // If we get to this point, either the key wasn't in the cache, or it was stale
         // So connect to the server, and send them the request
         int serverSock;
@@ -206,70 +167,6 @@ int main(int argc, char** argv) {
             write(clientConn, reqBuff.buff, reqBuff.size);
             break;
           }
-
-            // A couple things could happen here.
-            // If content length set, then just read content length
-            // If chunked encoding, find chunk size and read chunks
-            // Right now we're only handling chunked encoding
-            // int start = serverHeader.headerLength;
-            // while (serverHeader.chunkedEncoding) {
-            //   // Figure out how many characters are in the chunk size
-            //   char* endOfChunkLine = strstr(reqBuff.buff + start, "\r\n");
-            //   int size = endOfChunkLine - (reqBuff.buff + start);
-
-            //   // Get the chunk size string
-            //   char chunkSizeBuff[20];
-            //   memcpy(chunkSizeBuff, (reqBuff.buff + start), size);
-            //   chunkSizeBuff[size] = '\0';
-
-            //   // Convert the chunk size string to int. It's a hex number,
-            //   // so we use base 16
-            //   int chunkSize = (int)strtol(chunkSizeBuff, NULL, 16);
-
-            //   // This means there are no more chunks, so we read all the data
-            //   if (chunkSize == 0)
-            //     break;
-
-            //   // Add 2 for the \r\n
-            //   start += 2 + size;
-
-            //   // While the amount of bytes that we've read in the chunk
-            //   // is less than the size of the chunk, read more data
-            //   while (reqBuff.size - start < chunkSize) {
-            //     int bytesRead = readAll(serverSock, &reqBuff);
-            //     if (bytesRead == -1) {
-            //       break;
-            //     }
-            //     responseSize += bytesRead;
-            //   }
-
-            //   // There's a blank line between chunks
-            //   start += chunkSize + 2;
-            // }
-
-            // {  // add to cache
-            //   CacheKey* key = malloc(sizeof(CacheKey));
-            //   strcpy(key->url, clientHeader.url);
-            //   strcpy(key->port, clientHeader.port);
-
-            //   char* data = malloc(sizeof(char) * responseSize);
-            //   strcpy(data, reqBuff.buff);
-
-            //   CacheObj* obj = malloc(sizeof(CacheObj));
-            //   obj->data = data;
-            //   obj->timeCreated = time(NULL);
-            //   obj->timeToLive = 60;  // TODO: Change this to real time to live
-            //   obj->lastAccess = -1;
-
-            //   if (cache.numElem >= cache.maxElem) {
-            //     int numRemoved = ht_removeAll(&cache, isStale);
-            //     if (cache.numElem >= cache.maxElem) {
-            //       CacheKey* minKey = ht_findMin(&cache, cacheAccessCmp);
-            //       ht_removeKey(&cache, minKey);
-            //     }
-            //   }
-            //   ht_insert(&cache, key, obj);
-            // }
           case CONNECT: {
             char ok[] = "HTTP/1.1 200 OK\r\n\r\n";
             write(clientConn, ok, strlen(ok));
@@ -281,31 +178,6 @@ int main(int argc, char** argv) {
               // printf("T: %d\n", t);
               // t++;
               int bytesRead;
-
-              // int readSd = clientConn;
-              // int writeSd = serverSock;
-
-              // time_t startTime = time(NULL);
-
-              // da_clear(&getBuff);
-
-              // while (time(NULL) - startTime < 2) {
-              //   bytesRead = readAll(readSd, &getBuff);
-              //   // printf("About to read: %d, %d\n", bytesRead, getBuff.size);
-
-              //   if (bytesRead > 0) {
-              //     // printf("bytes read: %d\n", bytesRead);
-
-              //     write(writeSd, getBuff.buff, getBuff.size);
-
-              //     startTime = time(NULL);
-              //     da_clear(&getBuff);
-              //   }
-
-              //   int tmp = readSd;
-              //   readSd = writeSd;
-              //   writeSd = tmp;
-              // }
 
               time_t startTime = time(NULL);
               while ((bytesRead = readAll(clientConn, &getBuff)) < 0) {
@@ -357,101 +229,6 @@ int main(int argc, char** argv) {
       } // if (events[n].data.fd != clientSock)
     }
   }
-
-  // TODO: Make this an infinite loop
-  /*int i;
-  for(i = 0; i < 1; i++) {
-
-    { // Initalize Client Connection
-      struct sockaddr_in connAddr;
-      socklen_t connSize = sizeof(struct sockaddr_in);
-      clientConn = accept(clientSock, (struct sockaddr*)&connAddr, &connSize);
-    }
-
-    // Get data from the client and parse the header
-    readAll(clientConn, &getBuff);
-
-    // write(1, getBuff.buff, getBuff.size);
-
-    Header clientHeader;
-    parseHeader(&clientHeader, &getBuff);
-
-    printf("Header Size: %d - Buff Size: %d\n", clientHeader.headerLength, getBuff.size);
-
-    // Check to see if record is cached
-    // TODO: Make sure that caching actually works
-    CacheObj* record = cache_get(&clientHeader, &cache);
-    if (record != NULL) {
-      char* cur = record->data;
-      write(clientConn, cur, strlen(cur));  // TODO: probably should know the size instead of strlen
-      // TOOD: Figure out a way to add the age to the header
-      // The old way didn't work because it's possible that we get a header from a
-      // website with the age header already filled in
-
-      record->lastAccess = time(NULL);
-      close(clientConn);
-      da_clear(&getBuff);
-      continue;
-    }
-
-    // If we get to this point, either the key wasn't in the cache, or it was stale
-    // So connect to the server, and send them the request
-    int serverSock;
-    if ((serverSock = createServerSock(clientHeader.domain, clientHeader.port)) == -1) {
-      close(clientConn);  // TODO: Handle this error better
-      continue;
-    }
-
-    // Connection successful
-    // TODO: Maybe refactor this?
-    switch (clientHeader.method) {
-      case GET: {
-        write(serverSock, getBuff.buff, getBuff.size);
-        int servBytesRead = readAll(serverSock, &reqBuff);
-
-        printf("\nRead %d bytes from server\n", servBytesRead);
-
-        Header serverHeader;
-        parseHeader(&serverHeader, &reqBuff);
-
-        int responseSize = serverHeader.headerLength;
-        responseSize += readBody(serverSock, &serverHeader, &reqBuff);
-
-        clientHeader.timeToLive = 60;
-        cache_add(&clientHeader, &serverHeader, responseSize, &reqBuff, &cache);
-
-        write(clientConn, reqBuff.buff, reqBuff.size);
-        break;
-      }
-      case CONNECT: {
-        // char ok[] = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n";
-        // write(clientConn, ok, strlen(ok));
-        // da_clear(&getBuff);
-
-        // while (true) {
-        //   int bytesRead = readAll(clientConn, &getBuff);
-        //   if (bytesRead <= 0)
-        //     break;
-
-        //   write(serverSock, getBuff.buff, getBuff.size);
-
-        //   int servRead = readAll(serverSock, &reqBuff);
-        //   if (servRead <= 0)
-        //     break;
-
-        //   write(clientConn, reqBuff.buff, reqBuff.size);
-        //   da_clear(&getBuff);
-        //   da_clear(&reqBuff);
-        // }
-      }
-    }
-
-    close(serverSock);
-    close(clientConn);
-
-    da_clear(&getBuff);
-    da_clear(&reqBuff);
-  }*/
 
   // terminate buffers and free memory
   da_term(&reqBuff);
