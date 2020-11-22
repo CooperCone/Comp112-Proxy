@@ -31,3 +31,8 @@ All the changes were done in main(), except one line in parseHeader(). Macros
 were added for MAX_EVENTS (for the max number of client requests to handle at a
 time) and LOOP_SIZE (the outermost loop, should theoretically infinite, but for
 developing purposes we can limit)
+
+-- ercprk (Nov 22nd 15:43)
+
+Changed indentation and limited (most) lines to 80. If you don't like 80-column
+limit, feel free to change it! I'm still looking at the socket HTTPS
