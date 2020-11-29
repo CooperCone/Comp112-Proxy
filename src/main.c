@@ -28,6 +28,16 @@ void socketError(char* funcName);
 #define MAX_EVENTS 100  // For epoll_wait()
 #define LOOP_SIZE 12    // Should be infinite theoretically, but this is for testing
 
+typedef struct ConnectionData {
+    int first;
+    int second;
+    struct ConnectionData* next;
+} ConnectionData;
+
+ConnectionData* addConnectionPair(ConnectionData* data, int first, int second);
+int findConnectionPair(ConnectionData* data, int pair);
+ConnectionData* deleteConnectionPair(ConnectionData* data, int pair);
+
 int main(int argc, char** argv) {
     int epollfd;
     struct epoll_event ev;                  // epoll_ctl()
@@ -35,13 +45,14 @@ int main(int argc, char** argv) {
     int lc;                                 // loop counter
     int n, nfds;
 
-  	if (argc != 2) {
+    ConnectionData* connections = NULL;
+
+    if (argc != 2) {
         fprintf(stderr, "Invalid arguments!\n");
         fprintf(stderr, "Try: %s <Port_Number>\n", argv[0]);
         return 1;
-  	}
+    }
 
-    // TODO: Allow multiple client connections
     int clientSock, clientConn;
 
     // These are used to store the data that comes in from the
@@ -98,7 +109,7 @@ int main(int argc, char** argv) {
                 // since the clientConn socket would be registered to the epoll
                 // instance as edge-triggered (i.e. EPOLLET)
                 if (fcntl(clientConn, F_SETFL,
-                    fcntl(clientConn, F_GETFL, 0) | O_NONBLOCK) == -1) {
+                          fcntl(clientConn, F_GETFL, 0) | O_NONBLOCK) == -1) {
                     fprintf(stderr, "Error on fcntl()\n");
                 }
 
@@ -117,7 +128,17 @@ int main(int argc, char** argv) {
                 clientConn = events[n].data.fd;
 
                 // Get data from the client and parse the header
-                readAll(clientConn, &getBuff);
+                int bytesRead = readAll(clientConn, &getBuff);
+
+                // TODO: First check to see if it's an active connection
+                // If so, forward data between
+                int otherSock = findConnectionPair(connections, clientConn);
+                if (otherSock != -1) {
+                    write(otherSock, getBuff.buff, getBuff.size);
+                    da_clear(&getBuff);
+                    continue;
+                }
+
                 Header clientHeader;
                 parseHeader(&clientHeader, &getBuff);
 
@@ -170,70 +191,29 @@ int main(int argc, char** argv) {
                                   &reqBuff, &cache);
 
                         write(clientConn, reqBuff.buff, reqBuff.size);
+
+                        close(serverSock);
+                        close(clientConn);
                         break;
                     }
                     case CONNECT: {
                         char ok[] = "HTTP/1.1 200 OK\r\n\r\n";
                         write(clientConn, ok, strlen(ok));
-                        // write(1, ok, strlen(ok));
                         da_clear(&getBuff);
 
-                        int t = 0;
-                        while (true) {
-                            // printf("T: %d\n", t);
-                            // t++;
-                            int bytesRead;
+                        connections = addConnectionPair(connections, clientConn, serverSock);
 
-                            time_t startTime = time(NULL);
-                            while ((bytesRead = readAll(clientConn,
-                                                        &getBuff)) < 0) {
-                                if (time(NULL) - startTime > 1)
-                                    break;
-                            }
-
-                            if (time(NULL) - startTime > 1)
-                                break;
-
-                            // printf("Bytes Read: %d, %d\n", bytesRead, getBuff.size);
-
-                            // if (bytesRead < 0)
-                            //   break;
-
-                            write(serverSock, getBuff.buff, getBuff.size);
-                            // write(1, getBuff.buff, getBuff.size);
-                            // printf("Size: %d\n", getBuff.size);
-
-                            int servRead;
-
-                            startTime = time(NULL);
-                            while ((servRead = readAll(serverSock,
-                                                       &reqBuff)) < 0) {
-                                if (time(NULL) - startTime > 1)
-                                    break;
-                            }
-
-                            // printf("Recv Bytes Read: %d, %d\n", servRead, reqBuff.size);
-
-                            if (time(NULL) - startTime > 1)
-                                break;
-
-                            // if (servRead < 0)
-                            //   break;
-
-                            write(clientConn, reqBuff.buff, reqBuff.size);
-                            // write(1, reqBuff.buff, reqBuff.size);
-                            da_clear(&getBuff);
-                            da_clear(&reqBuff);
+                        ev.events = EPOLLIN | EPOLLET;
+                        ev.data.fd = serverSock;
+                        if (epoll_ctl(epollfd, EPOLL_CTL_ADD, serverSock, &ev) == -1) {
+                            fprintf(stderr, "Error on epoll_ctl() on serverSock\n");
                         }
                     }
-                } // switch
-
-                close(serverSock);
-                close(clientConn);
+                }  // switch
 
                 da_clear(&getBuff);
                 da_clear(&reqBuff);
-            } // if (events[n].data.fd != clientSock)
+            }  // if (events[n].data.fd != clientSock)
         }
     }
 
@@ -438,3 +418,37 @@ void socketError(char* funcName) {
     fprintf(stderr, "Exiting\n");
 }
 /****************************************************/
+
+ConnectionData* addConnectionPair(ConnectionData* data, int first, int second) {
+    ConnectionData* newData = malloc(sizeof(ConnectionData));
+    newData->first = first;
+    newData->second = second;
+    newData->next = data;
+    return newData;
+}
+
+int findConnectionPair(ConnectionData* data, int pair) {
+    if (data == NULL)
+        return -1;
+    else if (data->first == pair)
+        return data->second;
+    else if (data->second == pair)
+        return data->first;
+    else
+        return findConnectionPair(data->next, pair);
+}
+
+ConnectionData* deleteConnectionPair(ConnectionData* data, int pair) {
+    if (data == NULL)
+        return NULL;
+    else if (data->first == pair || data->second == pair) {
+        // TODO: Should we close sockets here?
+        ConnectionData* next = data->next;
+        free(data);
+        return next;
+    } else {
+        ConnectionData* next = deleteConnectionPair(data->next, pair);
+        data->next = next;
+        return data;
+    }
+}
