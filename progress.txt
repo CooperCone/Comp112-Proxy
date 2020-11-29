@@ -36,3 +36,13 @@ developing purposes we can limit)
 
 Changed indentation and limited (most) lines to 80. If you don't like 80-column
 limit, feel free to change it! I'm still looking at the socket HTTPS
+
+-- cooper (Nov 29th 12:44)
+
+Added in support for https persistent connections.
+I created a ConnectionData struct that stores a pair of sd's. When we get a
+CONNECT call, I create a new ConnectionData that stores both the client and 
+server sd's and add in the new server connection to the epollfd.
+Now, when epoll tells us that a socket is ready to be read, we read from it
+then check to see if it's in the connection data. If it is, we write to the
+other socket in the pair and continue.
