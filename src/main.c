@@ -63,8 +63,8 @@ int main(int argc, char** argv) {
     da_init(&getBuff, 2048);
     da_init(&reqBuff, 2048);
 
-    HashTable cache;
-    ht_init(&cache, 10, keyHash, keyCmp, termCacheObj);
+    HashTable *cache = malloc(sizeof(HashTable));
+    ht_init(cache, 10, keyHash, keyCmp, termCacheObj);
 
     if ((clientSock = createClientSock(argv[1])) == -1)
         return 1;
@@ -144,7 +144,7 @@ int main(int argc, char** argv) {
 
                 // Check to see if record is cached
                 // TODO: Make sure that caching actually works
-                CacheObj* record = cache_get(&clientHeader, &cache);
+                CacheObj* record = cache_get(&clientHeader, cache);
                 if (record != NULL) {
                     printf("\nFound Data in cache\n");
 
@@ -188,7 +188,7 @@ int main(int argc, char** argv) {
 
                         clientHeader.timeToLive = 60;
                         cache_add(&clientHeader, &serverHeader, responseSize,
-                                  &reqBuff, &cache);
+                                  &reqBuff, cache);
 
                         write(clientConn, reqBuff.buff, reqBuff.size);
 
@@ -218,6 +218,8 @@ int main(int argc, char** argv) {
     }
 
     // terminate buffers and free memory
+    free(cache);
+
     da_term(&reqBuff);
     da_term(&getBuff);
     close(clientSock);
