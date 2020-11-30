@@ -84,7 +84,8 @@ int main(int argc, char** argv) {
         exit(EXIT_FAILURE);
     }
 
-    for (lc = 0; lc < LOOP_SIZE; ++lc) {
+    for (;;) {
+        // for (lc = 0; lc < LOOP_SIZE; ++lc) {
         // printf("LC: %d\n", lc);
         // Blocking wait, waits for events to happen
         nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
@@ -348,6 +349,11 @@ bool parseHeader(Header* outHeader, DynamicArray* buff) {
             // printf("Domain: %s\n", outHeader->domain);
         } else if (strstr(line, "Transfer-Encoding: chunked") != NULL) {
             outHeader->chunkedEncoding = true;
+        } else if (strstr(line, "Content-Length: ") != NULL) {
+            char* start = strstr(line, ":") + 2;
+
+            int contentLength = atoi(start);
+            outHeader->contentLength = contentLength;
         } else if (outHeader->chunkedEncoding && atoi(line) != 0) {
             outHeader->headerLength = headerLen - strlen(line);
             free(copiedStr);
@@ -410,6 +416,17 @@ int readBody(int sock, Header* header, DynamicArray* buffer) {
         // There's a blank line between chunks
         start += chunkSize + 2;
     }
+
+    if (!header->chunkedEncoding && header->contentLength != -1) {
+        // I have no idea why we have to subtract 3 here. I thought it
+        // would only be 2, but it didn't work unless it was 3
+        while (buffer->size <
+               (header->headerLength + header->contentLength - 3)) {
+            readAll(sock, buffer);
+        }
+        bodySize = header->contentLength - 2;
+    }
+
     return bodySize + 2;  // TODO: Check if this is correct
 }
 
