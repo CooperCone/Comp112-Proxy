@@ -46,3 +46,6 @@ server sd's and add in the new server connection to the epollfd.
 Now, when epoll tells us that a socket is ready to be read, we read from it
 then check to see if it's in the connection data. If it is, we write to the
 other socket in the pair and continue.
+
+I also added in support for content-length encoding. This lets us use the
+proxy in browsers like firefox for HTTP. Still working on HTTPS in browsers
