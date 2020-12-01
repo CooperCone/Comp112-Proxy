@@ -120,18 +120,17 @@ int main(int argc, char** argv) {
                 // Initialize Client Connection
                 struct sockaddr_in connAddr;
                 socklen_t connSize = sizeof(struct sockaddr_in);
-                clientConn = accept(clientSock, (struct sockaddr*)&connAddr,
-                                    &connSize);
+                clientConn = accept(clientSock, (struct sockaddr*)&connAddr, &connSize);
                 if (clientConn == -1) {
                     fprintf(stderr, "Error on accept()\n");
                     exit(EXIT_FAILURE);
                 }
+                printf("Accepted connection from %s:%u\n", inet_ntoa(connAddr.sin_addr), connAddr.sin_port);
 
                 // Set the clientConn as a non-block socket. This is necessary,
                 // since the clientConn socket would be registered to the epoll
                 // instance as edge-triggered (i.e. EPOLLET)
-                if (fcntl(clientConn, F_SETFL,
-                          fcntl(clientConn, F_GETFL, 0) | O_NONBLOCK) == -1) {
+                if (fcntl(clientConn, F_SETFL, fcntl(clientConn, F_GETFL, 0) | O_NONBLOCK) == -1) {
                     fprintf(stderr, "Error on fcntl()\n");
                 }
 
@@ -202,8 +201,7 @@ int main(int argc, char** argv) {
                 }
                 else {
                     printf("Opening new socket for %s:%s\n", clientHeader.domain, clientHeader.port);
-                    if ((serverSock = createServerSock(clientHeader.domain,
-                                                   clientHeader.port)) == -1) {
+                    if ((serverSock = createServerSock(clientHeader.domain, clientHeader.port)) == -1) {
                         close(clientConn);  // TODO: Handle this error more gracefully
                         continue;
                     }
@@ -214,7 +212,7 @@ int main(int argc, char** argv) {
                 // Connection successful
                 switch (clientHeader.method) {
                     case GET: {
-                        while (clientData->buffer.size > 0) {                            
+                        while (clientData->buffer.size > 0) {
                             write(serverSock, clientData->buffer.buff, clientHeader.headerLength);
                             int servBytesRead = readAll(serverSock, &reqBuff);
 
@@ -256,10 +254,11 @@ int main(int argc, char** argv) {
                 }  // switch
 
                 da_clear(&reqBuff);
+                printf("eoif\n");
             }  // if (events[n].data.fd != clientSock)
-        }
-    }
-
+        } // for (n = 0; n < nfds; ++n)
+    } // for (;;)
+    printf("eol\n");
     // terminate buffers and free memory
     free(cache);
 
