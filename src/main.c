@@ -12,6 +12,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include <signal.h>
 
 #include "cache.h"
 #include "dynamicArray.h"
@@ -72,6 +73,8 @@ int main(int argc, char** argv) {
     ConnectionData *connections = NULL;
     ClientData *clients = NULL;
     ServerData *servers = NULL;
+
+    signal(SIGPIPE, SIG_IGN); // ignore sigpipe, handle with write call
 
     if (argc != 2) {
         fprintf(stderr, "Invalid arguments!\n");
@@ -173,23 +176,23 @@ int main(int argc, char** argv) {
                 }
 
                 // Check to see if record is cached
-                // TODO: Fix Caching that breaks images
-                // CacheObj* record = cache_get(&clientHeader, cache);
-                // if (record != NULL) {
-                //     printf("\nFound Data in cache\n");
+                CacheObj* record = cache_get(&clientHeader, cache);
+                if (record != NULL) {
+                    printf("\nFound Data in cache\n");
 
-                //     char* cur = record->data;
-                //     write(clientConn, cur, strlen(cur));
-                //     // TOOD: Figure out a way to add the age to the header
-                //     // The old way didn't work because it's possible that we get
-                //     // a header from a website with the age header already
-                //     // filled in
+                    char* cur = record->data;
+                    write(clientConn, cur, strlen(cur));
+                    // TOOD: Figure out a way to add the age to the header
+                    // The old way didn't work because it's possible that we get
+                    // a header from a website with the age header already
+                    // filled in
 
-                //     record->lastAccess = time(NULL);
-                //     close(clientConn);
-                //     da_clear(&getBuff);
-                //     continue;
-                // }
+                    record->lastAccess = time(NULL);
+                    // close(clientConn);
+                    // da_clear(&getBuff);
+                    da_clear(&clientData->buffer);
+                    continue;
+                }
 
                 // If we get to this point, either the key wasn't in the cache,
                 // or it was stale
@@ -215,8 +218,22 @@ int main(int argc, char** argv) {
                 switch (clientHeader.method) {
                     case GET: {
                         while (clientData->buffer.size > 0) {                            
-                            write(serverSock, clientData->buffer.buff, clientHeader.headerLength);
+                            int val = write(serverSock, clientData->buffer.buff, clientHeader.headerLength);
+                            if (val == -1) { // This means SIGPIPE
+                                // Server closed, so open up a new one
+                                close(serverSock);
+                                servData = findServerDataBySock(servers, serverSock);
+                                serverSock = createServerSock(clientHeader.domain, clientHeader.port);
+                                if (serverSock == -1)
+                                    break;
+                                servData->sock = serverSock;
+                                write(serverSock, clientData->buffer.buff, clientHeader.headerLength);
+                            }
+                            
                             int servBytesRead = readAll(serverSock, &reqBuff);
+
+                            if (servBytesRead == 0)
+                                continue;
 
                             Header serverHeader;
                             memset(&serverHeader, 0, sizeof(Header));
@@ -229,13 +246,13 @@ int main(int argc, char** argv) {
 
                             clientHeader.timeToLive = 60;
 
-                            // TODO: Fix cache
-                            // cache_add(&clientHeader, &serverHeader, responseSize,
-                            //           &reqBuff, cache);
+                            cache_add(&clientHeader, &serverHeader, responseSize,
+                                      &reqBuff, cache);
 
                             write(clientConn, reqBuff.buff, reqBuff.size);
 
                             da_clear(&reqBuff);
+                            // printf("Buffer Size %d - Amount %d\n", clientData->buffer.size, clientHeader.headerLength);
                             da_shift(&(clientData->buffer), clientHeader.headerLength);
                         }
                         break;
@@ -450,8 +467,6 @@ int readBody(int sock, Header* header, DynamicArray* buffer) {
         char chunkSizeBuff[20];
         memcpy(chunkSizeBuff, (buffer->buff + start), size);
         chunkSizeBuff[size] = '\0';
-
-        printf("Chunk Size: %s\n", chunkSizeBuff);
 
         // Convert the chunk size string to int. It's a hex number,
         // so we use base 16

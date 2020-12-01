@@ -7,6 +7,9 @@
 #include "dynamicArray.h"
 
 void da_shift(DynamicArray *buffer, int amount) {
+  if (buffer->size <= 0) {
+    return;
+  }
   char *newBuff = malloc(buffer->size);
   memcpy(newBuff, buffer->buff, buffer->size);
   buffer->size -= amount;
@@ -16,6 +19,7 @@ void da_shift(DynamicArray *buffer, int amount) {
 
 void da_init(DynamicArray *buffer, int size) {
   buffer->buff = malloc(size * sizeof(char));
+  memset(buffer->buff, 0, size);
   buffer->size = 0;
   buffer->maxSize = size;
 }
