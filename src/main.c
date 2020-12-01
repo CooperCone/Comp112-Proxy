@@ -151,23 +151,23 @@ int main(int argc, char** argv) {
 
                 // Check to see if record is cached
                 // TODO: Make sure that caching actually works
-                CacheObj* record = cache_get(&clientHeader, cache);
-                if (record != NULL) {
-                    printf("\nFound Data in cache\n");
+                // CacheObj* record = cache_get(&clientHeader, cache);
+                // if (record != NULL) {
+                //     printf("\nFound Data in cache\n");
 
-                    char* cur = record->data;
-                    // TODO: probably should know the size instead of strlen
-                    write(clientConn, cur, strlen(cur));
-                    // TOOD: Figure out a way to add the age to the header
-                    // The old way didn't work because it's possible that we get
-                    // a header from a website with the age header already
-                    // filled in
+                //     char* cur = record->data;
+                //     // TODO: probably should know the size instead of strlen
+                //     write(clientConn, cur, strlen(cur));
+                //     // TOOD: Figure out a way to add the age to the header
+                //     // The old way didn't work because it's possible that we get
+                //     // a header from a website with the age header already
+                //     // filled in
 
-                    record->lastAccess = time(NULL);
-                    close(clientConn);
-                    da_clear(&getBuff);
-                    continue;
-                }
+                //     record->lastAccess = time(NULL);
+                //     close(clientConn);
+                //     da_clear(&getBuff);
+                //     continue;
+                // }
 
                 // If we get to this point, either the key wasn't in the cache,
                 // or it was stale
@@ -364,14 +364,18 @@ bool parseHeader(Header* outHeader, DynamicArray* buff) {
         } else if (outHeader->chunkedEncoding && atoi(line) != 0) {
             outHeader->headerLength = headerLen - lineLen;
             return true;
-        } else if (lineLen == 0) {
+        } 
+        if (lineLen == 0) {
             outHeader->headerLength = headerLen;
             return true;  // reached header end
         }
         // else
         //   printf("Unknown Header: %s\n", line);
         line += lineLen + 2;
-        lineLen = strstr(line, delim) - line;
+        char *next = strstr(line, delim);
+        if (next == NULL)
+            break;
+        lineLen = next - line;
     }
 
     outHeader->headerLength = headerLen;
