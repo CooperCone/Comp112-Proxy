@@ -2,7 +2,8 @@
 
 typedef enum {
   GET,
-  CONNECT
+  CONNECT,
+  POST
 } Method;
 
 typedef struct {

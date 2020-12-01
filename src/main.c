@@ -143,6 +143,12 @@ int main(int argc, char** argv) {
                 Header clientHeader;
                 parseHeader(&clientHeader, &getBuff);
 
+                if (clientHeader.method == POST) {
+                    close(clientConn); // TODO: remove from epoll
+                    da_clear(&getBuff);
+                    continue;
+                }
+
                 // Check to see if record is cached
                 // TODO: Make sure that caching actually works
                 CacheObj* record = cache_get(&clientHeader, cache);
@@ -198,6 +204,7 @@ int main(int argc, char** argv) {
                         break;
                     }
                     case CONNECT: {
+                        // printf("HTTPS Connection: \n");
                         char ok[] = "HTTP/1.1 200 OK\r\n\r\n";
                         write(clientConn, ok, strlen(ok));
                         da_clear(&getBuff);
@@ -300,14 +307,14 @@ bool parseHeader(Header* outHeader, DynamicArray* buff) {
     outHeader->chunkedEncoding = false;
     int headerLen = 0;
 
-    char* copiedStr = malloc(buff->size);
-    memcpy(copiedStr, buff->buff, buff->size);
+    const char delim[] = "\r";
+    char* line = buff->buff;
+    unsigned long lineLen = strstr(line, delim) - line;
 
-    char* line = strtok(copiedStr, "\r\n");
     while (line) {
         // printf("Line: %s\n", line);
 
-        headerLen += (strlen(line) + 2);
+        headerLen += (lineLen + 2);
 
         if (strstr(line, "GET ") != NULL ||
             strstr(line, "CONNECT ") != NULL) {
@@ -319,12 +326,11 @@ bool parseHeader(Header* outHeader, DynamicArray* buff) {
             char* urlEnd;
             urlPortSep = strstr(strstr(getUrl, ":") + 1, ":");  // Second occurence
             if ((urlEnd = strstr(getUrl, " ")) == NULL) {
-                free(copiedStr);
                 return false;
             }
 
             size_t urlLen;
-            if (urlPortSep == NULL) {
+            if ((urlPortSep - getUrl) >= lineLen) {
                 urlLen = urlEnd - getUrl;
                 strcpy(outHeader->port, useSSL ? "443" : "80");
             } else {
@@ -335,18 +341,19 @@ bool parseHeader(Header* outHeader, DynamicArray* buff) {
                 outHeader->port[portLen] = '\0';
             }
 
-            // printf("Port: %s\n", outHeader->port);
-
             memcpy(outHeader->url, getUrl, urlLen);
             outHeader->url[urlLen] = '\0';
+        } 
+        else if (strstr(line, "POST") != NULL) {
+            outHeader->method = POST;
+            return false;
         } else if (strstr(line, "Host: ") != NULL) {
             char* domain = line + 6;
             char* portSep = strstr(domain, ":");
 
-            int domainLen = portSep == NULL ? strlen(domain) : portSep - domain;
+            int domainLen = (portSep - line) > lineLen ? lineLen - 6 : portSep - domain;
             memcpy(outHeader->domain, domain, domainLen);
             outHeader->domain[domainLen] = '\0';
-            // printf("Domain: %s\n", outHeader->domain);
         } else if (strstr(line, "Transfer-Encoding: chunked") != NULL) {
             outHeader->chunkedEncoding = true;
         } else if (strstr(line, "Content-Length: ") != NULL) {
@@ -355,21 +362,19 @@ bool parseHeader(Header* outHeader, DynamicArray* buff) {
             int contentLength = atoi(start);
             outHeader->contentLength = contentLength;
         } else if (outHeader->chunkedEncoding && atoi(line) != 0) {
-            outHeader->headerLength = headerLen - strlen(line);
-            free(copiedStr);
+            outHeader->headerLength = headerLen - lineLen;
             return true;
-        } else if (strlen(line) <= 1) {
-            outHeader->headerLength = headerLen + 2;
-            free(copiedStr);
+        } else if (lineLen == 0) {
+            outHeader->headerLength = headerLen;
             return true;  // reached header end
         }
         // else
         //   printf("Unknown Header: %s\n", line);
-        line = strtok(NULL, "\r\n");
+        line += lineLen + 2;
+        lineLen = strstr(line, delim) - line;
     }
 
     outHeader->headerLength = headerLen;
-    free(copiedStr);
     return true;
 }
 
