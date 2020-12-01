@@ -57,5 +57,5 @@ the clients or servers. When a client connects to a server, we first check
 to see if we have an open connection with that server and reuse it if we do.
 Added in a lot of stability. Strtok caused a lot of problems with header
 parsing. Now, you can connect a browser to the proxy and it'll work reliably.
-To get this done, I had to remove caching because it was causing a few problems.
-Fixing caching is the next step for me.
+Next step is to make cache bigger, and make it better. I'll try to add in
+content pre-fetching.

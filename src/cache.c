@@ -8,7 +8,7 @@ void cache_add(Header* clientHeader, Header* servHeader, int dataSize, DynamicAr
   strcpy(key->url, clientHeader->url);
   strcpy(key->port, clientHeader->port);
 
-  char* data = malloc(sizeof(char) * dataSize);
+  char* data = malloc(sizeof(char) * (buff->size + 1));
   strcpy(data, buff->buff);
 
   CacheObj* obj = malloc(sizeof(CacheObj));
