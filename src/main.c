@@ -31,12 +31,23 @@ void socketError(char* funcName);
 typedef struct ConnectionData {
     int first;
     int second;
-    struct ConnectionData* next;
+    DynamicArray buffer;
+    struct ConnectionData *next;
 } ConnectionData;
 
+typedef struct ClientData {
+    int sock;
+    DynamicArray buffer;
+    struct ClientData *next;
+} ClientData;
+
 ConnectionData* addConnectionPair(ConnectionData* data, int first, int second);
-int findConnectionPair(ConnectionData* data, int pair);
+int findConnectionPair(ConnectionData* data, DynamicArray **out, int pair);
 ConnectionData* deleteConnectionPair(ConnectionData* data, int pair);
+
+ClientData *addClientData(ClientData *data, int sock);
+ClientData *findClientData(ClientData *data, int sock);
+ClientData *deleteClientData(ClientData *data, int sock);
 
 int main(int argc, char** argv) {
     int epollfd;
@@ -45,7 +56,8 @@ int main(int argc, char** argv) {
     int lc;                                 // loop counter
     int n, nfds;
 
-    ConnectionData* connections = NULL;
+    ConnectionData *connections = NULL;
+    ClientData *clients = NULL;
 
     if (argc != 2) {
         fprintf(stderr, "Invalid arguments!\n");
@@ -59,8 +71,9 @@ int main(int argc, char** argv) {
     // client and server respectively
     // There will probably need to be one associated with
     // each client
-    DynamicArray getBuff, reqBuff;
-    da_init(&getBuff, 2048);
+    DynamicArray reqBuff;
+    // DynamicArray getBuff, 
+    // da_init(&getBuff, 2048);
     da_init(&reqBuff, 2048);
 
     HashTable *cache = malloc(sizeof(HashTable));
@@ -114,6 +127,8 @@ int main(int argc, char** argv) {
                     fprintf(stderr, "Error on fcntl()\n");
                 }
 
+                clients = addClientData(clients, clientConn);
+
                 // Register the clientConn socket to the epoll instance
                 ev.events = EPOLLIN | EPOLLET;
                 ev.data.fd = clientConn;
@@ -128,29 +143,39 @@ int main(int argc, char** argv) {
 
                 clientConn = events[n].data.fd;
 
-                // Get data from the client and parse the header
-                int bytesRead = readAll(clientConn, &getBuff);
-
                 // TODO: First check to see if it's an active connection
                 // If so, forward data between
-                int otherSock = findConnectionPair(connections, clientConn);
+                DynamicArray *connectionBuff;
+                int otherSock = findConnectionPair(connections, &connectionBuff, clientConn);
                 if (otherSock != -1) {
-                    write(otherSock, getBuff.buff, getBuff.size);
-                    da_clear(&getBuff);
+                    // TODO: Use a connection buffer
+                    int bytesRead = readAll(clientConn, connectionBuff);
+                    write(otherSock, connectionBuff->buff, connectionBuff->size);
+                    da_clear(connectionBuff);
                     continue;
                 }
 
-                Header clientHeader;
-                parseHeader(&clientHeader, &getBuff);
+                ClientData *clientData = findClientData(clients, clientConn);
+                int bytesRead = readAll(clientConn, &(clientData->buffer));
 
+                Header clientHeader;
+                parseHeader(&clientHeader, &(clientData->buffer));
+                // TODO: do we need to read bodies for requests?
+
+                printf("Request Header: \n");
+                printf("Header Size: %d - Content Len: %d - Buff Size: %d\n", clientHeader.headerLength, clientHeader.contentLength, clientData->buffer.size);
+                write(1, clientData->buffer.buff, clientHeader.headerLength);
+                printf("\n\n");
+
+                // TODO: should we handle POST?
                 if (clientHeader.method == POST) {
                     close(clientConn); // TODO: remove from epoll
-                    da_clear(&getBuff);
+                    da_clear(&clientData->buffer);
                     continue;
                 }
 
                 // Check to see if record is cached
-                // TODO: Make sure that caching actually works
+                // TODO: Fix Caching that breaks images
                 // CacheObj* record = cache_get(&clientHeader, cache);
                 // if (record != NULL) {
                 //     printf("\nFound Data in cache\n");
@@ -183,32 +208,39 @@ int main(int argc, char** argv) {
                 // TODO: Maybe refactor this?
                 switch (clientHeader.method) {
                     case GET: {
-                        write(serverSock, getBuff.buff, getBuff.size);
+                        write(serverSock, clientData->buffer.buff, clientData->buffer.size);
                         int servBytesRead = readAll(serverSock, &reqBuff);
 
                         Header serverHeader;
                         parseHeader(&serverHeader, &reqBuff);
+
+                        printf("Header: \n");
+                        printf("Header Size: %d - Content Len: %d - Buff Size: %d\n", serverHeader.headerLength, serverHeader.contentLength, reqBuff.size);
+                        write(1, reqBuff.buff, serverHeader.headerLength);
+                        printf("\n\n");
 
                         int responseSize = serverHeader.headerLength;
                         responseSize += readBody(serverSock, &serverHeader,
                                                  &reqBuff);
 
                         clientHeader.timeToLive = 60;
-                        cache_add(&clientHeader, &serverHeader, responseSize,
-                                  &reqBuff, cache);
+
+                        // TODO: Fix cache
+                        // cache_add(&clientHeader, &serverHeader, responseSize,
+                        //           &reqBuff, cache);
 
                         write(clientConn, reqBuff.buff, reqBuff.size);
 
                         close(serverSock);
-                        close(clientConn);
+                        // close(clientConn);
                         break;
                     }
                     case CONNECT: {
                         // printf("HTTPS Connection: \n");
                         char ok[] = "HTTP/1.1 200 OK\r\n\r\n";
                         write(clientConn, ok, strlen(ok));
-                        da_clear(&getBuff);
 
+                        clients = deleteClientData(clients, clientConn);
                         connections = addConnectionPair(connections, clientConn, serverSock);
 
                         ev.events = EPOLLIN | EPOLLET;
@@ -219,7 +251,7 @@ int main(int argc, char** argv) {
                     }
                 }  // switch
 
-                da_clear(&getBuff);
+                // da_clear(&getBuff);
                 da_clear(&reqBuff);
             }  // if (events[n].data.fd != clientSock)
         }
@@ -229,7 +261,7 @@ int main(int argc, char** argv) {
     free(cache);
 
     da_term(&reqBuff);
-    da_term(&getBuff);
+    // da_term(&getBuff);
     close(clientSock);
     close(epollfd);
     return 0;
@@ -316,9 +348,11 @@ bool parseHeader(Header* outHeader, DynamicArray* buff) {
 
         headerLen += (lineLen + 2);
 
-        if (strstr(line, "GET ") != NULL ||
-            strstr(line, "CONNECT ") != NULL) {
-            bool useSSL = strstr(line, "CONNECT ") != NULL;
+        char *getStr = strstr(line, "GET ");
+        char *connectStr = strstr(line, "CONNECT ");
+        if ((getStr != NULL && getStr - line <= lineLen) ||
+            (connectStr != NULL && connectStr - line <= lineLen)) {
+            bool useSSL = connectStr != NULL;
             outHeader->method = useSSL ? CONNECT : GET;
 
             char* getUrl = useSSL ? line + 8 : line + 4;
@@ -330,7 +364,7 @@ bool parseHeader(Header* outHeader, DynamicArray* buff) {
             }
 
             size_t urlLen;
-            if ((urlPortSep - getUrl) >= lineLen) {
+            if ((urlPortSep - line) >= lineLen) {
                 urlLen = urlEnd - getUrl;
                 strcpy(outHeader->port, useSSL ? "443" : "80");
             } else {
@@ -344,28 +378,43 @@ bool parseHeader(Header* outHeader, DynamicArray* buff) {
             memcpy(outHeader->url, getUrl, urlLen);
             outHeader->url[urlLen] = '\0';
         } 
-        else if (strstr(line, "POST") != NULL) {
+        
+        char *postStr = strstr(line, "POST"); 
+        if (postStr != NULL && postStr - line <= lineLen) {
             outHeader->method = POST;
-            return false;
-        } else if (strstr(line, "Host: ") != NULL) {
+        } 
+        
+        char *hostStr = strstr(line, "Host: ");
+        if (hostStr != NULL && hostStr - line <= lineLen) {
             char* domain = line + 6;
             char* portSep = strstr(domain, ":");
 
             int domainLen = (portSep - line) > lineLen ? lineLen - 6 : portSep - domain;
             memcpy(outHeader->domain, domain, domainLen);
             outHeader->domain[domainLen] = '\0';
-        } else if (strstr(line, "Transfer-Encoding: chunked") != NULL) {
+        }
+        
+        char *chunkStr = strstr(line, "Transfer-Encoding: chunked");
+        if (chunkStr != NULL && chunkStr - line <= lineLen) {
             outHeader->chunkedEncoding = true;
-        } else if (strstr(line, "Content-Length: ") != NULL) {
+        } 
+        
+        char *contentLenStr = strstr(line, "Content-Length: ");
+        if (contentLenStr != NULL && contentLenStr - line <= lineLen) {
             char* start = strstr(line, ":") + 2;
 
             int contentLength = atoi(start);
             outHeader->contentLength = contentLength;
-        } else if (outHeader->chunkedEncoding && atoi(line) != 0) {
+        }
+        
+        if (outHeader->chunkedEncoding && atoi(line) != 0) {
             outHeader->headerLength = headerLen - lineLen;
             return true;
         } 
-        if (lineLen == 0) {
+        
+        if (lineLen == 0 || line - buff->buff + lineLen + 2 > buff->size) {
+            if (headerLen > buff->size)
+                headerLen = buff->size;
             outHeader->headerLength = headerLen;
             return true;  // reached header end
         }
@@ -435,6 +484,17 @@ int readBody(int sock, Header* header, DynamicArray* buffer) {
         }
         bodySize = header->contentLength - 2;
     }
+    
+    if (!header->chunkedEncoding && header->contentLength == -1) {
+        // while (true) {
+        //     int bytesRead = readAll(sock, buffer);
+        //     if (bytesRead == -1)
+        //         break;
+        //     bodySize += bytesRead;
+        // }
+        // bodySize -= 2;
+        return 0;
+    }
 
     return bodySize + 2;  // TODO: Check if this is correct
 }
@@ -452,18 +512,23 @@ ConnectionData* addConnectionPair(ConnectionData* data, int first, int second) {
     newData->first = first;
     newData->second = second;
     newData->next = data;
+    da_init(&newData->buffer, 2048);
     return newData;
 }
 
-int findConnectionPair(ConnectionData* data, int pair) {
+int findConnectionPair(ConnectionData* data, DynamicArray **out, int pair) {
     if (data == NULL)
         return -1;
-    else if (data->first == pair)
+    else if (data->first == pair) {
+        *out = &data->buffer;
         return data->second;
-    else if (data->second == pair)
+    }
+    else if (data->second == pair) {
+        *out = &data->buffer;
         return data->first;
+    }
     else
-        return findConnectionPair(data->next, pair);
+        return findConnectionPair(data->next, out, pair);
 }
 
 ConnectionData* deleteConnectionPair(ConnectionData* data, int pair) {
@@ -472,10 +537,46 @@ ConnectionData* deleteConnectionPair(ConnectionData* data, int pair) {
     else if (data->first == pair || data->second == pair) {
         // TODO: Should we close sockets here?
         ConnectionData* next = data->next;
+        da_term(&data->buffer);
         free(data);
         return next;
     } else {
         ConnectionData* next = deleteConnectionPair(data->next, pair);
+        data->next = next;
+        return data;
+    }
+}
+
+
+ClientData *addClientData(ClientData *data, int sock) {
+    ClientData *newData = malloc(sizeof(ClientData));
+    newData->sock = sock;
+    newData->next = data;
+    da_init(&(newData->buffer), 2048);
+    return newData;
+}
+
+
+ClientData *findClientData(ClientData *data, int sock) {
+    if (data == NULL)
+        return NULL;
+    else if (data->sock = sock)
+        return data;
+    else return findClientData(data->next, sock);
+}
+
+
+ClientData *deleteClientData(ClientData *data, int sock) {
+    if (data == NULL)
+        return NULL;
+    else if (data->sock == sock) {
+        da_term(&(data->buffer));
+        ClientData *next = data->next;
+        free(data);
+        return next;
+    }
+    else {
+        ClientData *next = deleteClientData(data->next, sock);
         data->next = next;
         return data;
     }
