@@ -49,3 +49,13 @@ other socket in the pair and continue.
 
 I also added in support for content-length encoding. This lets us use the
 proxy in browsers like firefox for HTTP. Still working on HTTPS in browsers
+
+-- cooper (Dec 1st 13:12)
+
+Added in support for reused connections. We no longer close connections with
+the clients or servers. When a client connects to a server, we first check
+to see if we have an open connection with that server and reuse it if we do.
+Added in a lot of stability. Strtok caused a lot of problems with header
+parsing. Now, you can connect a browser to the proxy and it'll work reliably.
+To get this done, I had to remove caching because it was causing a few problems.
+Fixing caching is the next step for me.
