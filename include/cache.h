@@ -16,11 +16,12 @@ typedef struct HashTable HashTable;
 // of mallocs, so it would be better to write a custom
 // pool allocator for my CacheObj's
 typedef struct CacheObj {
-  char *data;
-  time_t timeCreated;
-  int timeToLive;
-  int lastAccess;
-  int headerSize;
+    char *data;
+    time_t timeCreated;
+    int timeToLive;
+    int lastAccess;
+    int headerSize;
+    int dataSize;
 } CacheObj;
 
 typedef struct CacheKey {

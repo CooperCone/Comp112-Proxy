@@ -27,7 +27,6 @@ void socketError(char* funcName);
 /******************************************/
 
 #define MAX_EVENTS 100  // For epoll_wait()
-#define LOOP_SIZE 12    // Should be infinite theoretically, but this is for testing
 
 typedef struct ConnectionData {
     int first;
@@ -67,8 +66,7 @@ int main(int argc, char** argv) {
     int epollfd;
     struct epoll_event ev;                  // epoll_ctl()
     struct epoll_event events[MAX_EVENTS];  // epoll_wait()
-    int lc;                                 // loop counter
-    int n, nfds;
+    int nfds;
 
     ConnectionData *connections = NULL;
     ClientData *clients = NULL;
@@ -109,8 +107,6 @@ int main(int argc, char** argv) {
     }
 
     for (;;) {
-        // for (lc = 0; lc < LOOP_SIZE; ++lc) {
-        // printf("LC: %d\n", lc);
         // Blocking wait, waits for events to happen
         nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
         if (nfds == -1) {
@@ -118,7 +114,7 @@ int main(int argc, char** argv) {
             exit(EXIT_FAILURE);
         }
 
-        for (n = 0; n < nfds; ++n) {
+        for (int n = 0; n < nfds; ++n) {
             if (events[n].data.fd == clientSock) {
                 // Initialize Client Connection
                 struct sockaddr_in connAddr;
@@ -128,7 +124,6 @@ int main(int argc, char** argv) {
                     fprintf(stderr, "Error on accept()\n");
                     exit(EXIT_FAILURE);
                 }
-                printf("Accepted connection from %s:%u\n", inet_ntoa(connAddr.sin_addr), connAddr.sin_port);
 
                 // Set the clientConn as a non-block socket. This is necessary,
                 // since the clientConn socket would be registered to the epoll
@@ -179,12 +174,11 @@ int main(int argc, char** argv) {
                 if (record != NULL) {
                     printf("\nFound Data in cache\n");
 
+                    time_t age = time(NULL) - record->timeCreated;
+
                     char* cur = record->data;
                     write(clientConn, cur, strlen(cur));
-                    // TOOD: Figure out a way to add the age to the header
-                    // The old way didn't work because it's possible that we get
-                    // a header from a website with the age header already
-                    // filled in
+                    // writeResponseWithAge()
 
                     record->lastAccess = time(NULL);
                     // close(clientConn);
@@ -215,11 +209,7 @@ int main(int argc, char** argv) {
                 // Connection successful
                 switch (clientHeader.method) {
                     case GET: {
-<<<<<<< HEAD
                         while (clientData->buffer.size > 0) {
-                            write(serverSock, clientData->buffer.buff, clientHeader.headerLength);
-=======
-                        while (clientData->buffer.size > 0) {                            
                             int val = write(serverSock, clientData->buffer.buff, clientHeader.headerLength);
                             if (val == -1) { // This means SIGPIPE
                                 // Server closed, so open up a new one
@@ -232,7 +222,6 @@ int main(int argc, char** argv) {
                                 write(serverSock, clientData->buffer.buff, clientHeader.headerLength);
                             }
                             
->>>>>>> 01425fa3326c2beafd1f32da67816fb01c060dba
                             int servBytesRead = readAll(serverSock, &reqBuff);
 
                             if (servBytesRead == 0)
@@ -249,8 +238,7 @@ int main(int argc, char** argv) {
 
                             clientHeader.timeToLive = 60;
 
-                            cache_add(&clientHeader, &serverHeader, responseSize,
-                                      &reqBuff, cache);
+                            cache_add(&clientHeader, &serverHeader, responseSize, &reqBuff, cache);
 
                             write(clientConn, reqBuff.buff, reqBuff.size);
 
@@ -276,11 +264,9 @@ int main(int argc, char** argv) {
                 }  // switch
 
                 da_clear(&reqBuff);
-                printf("eoif\n");
             }  // if (events[n].data.fd != clientSock)
         } // for (n = 0; n < nfds; ++n)
     } // for (;;)
-    printf("eol\n");
     // terminate buffers and free memory
     free(cache);
 

@@ -17,6 +17,7 @@ void cache_add(Header* clientHeader, Header* servHeader, int dataSize, DynamicAr
   obj->timeToLive = servHeader->timeToLive;  // TODO: Change this to real time to live
   obj->lastAccess = -1;
   obj->headerSize = servHeader->headerLength;
+  obj->dataSize = dataSize;
 
   if (cache->numElem >= cache->maxElem) {
     int numRemoved = ht_removeAll(cache, isStale);
