@@ -24,6 +24,7 @@ int createClientSock(const char *port);
 int createServerSock(char *domain, char *port);
 bool parseHeader(Header *outHeader, DynamicArray *buff);
 int readBody(int sock, Header *header, DynamicArray *buffer);
+void prefetchImgTags(char *html, DataList **imageServers, int epollfd);
 void socketError(char *funcName);
 /******************************************/
 
@@ -164,7 +165,7 @@ int main(int argc, char **argv) {
                 parseHeader(&clientHeader, &(clientData->buffer));
                 // TODO: do we need to read bodies for requests?
 
-                printf("Url: %s\n\n", clientHeader.url);
+                printf("Url: %s\n", clientHeader.url);
 
                 // TODO: should we handle POST differently?
                 if (clientHeader.method == POST) {
@@ -209,7 +210,7 @@ int main(int argc, char **argv) {
                 DataList *servDl;
                 if (clientHeader.method == GET && (servDl = findData(servers, (CmpFunc)servDomainCmp, clientHeader.domain)) != NULL) {
                     serverSock = ((ServerData*)servDl->data)->sock;
-                    printf("Reusing socket for %s\n", clientHeader.domain);
+                    printf("Reusing socket for %s\n\n", clientHeader.domain);
                 } else {
                     printf("Opening new socket for %s:%s\n", clientHeader.domain, clientHeader.port);
                     if ((serverSock = createServerSock(clientHeader.domain,
@@ -251,77 +252,19 @@ int main(int argc, char **argv) {
                                                     &reqBuff);
                             responseSize += bodySize;
 
-                            // TEST Pre fetch code
-
-                            char *uncompressed;
-                            int uncompressSize;
+                            // Search for IMG tags in html and pull them before client asks
+                            // If data is compressed, we need to uncompress it
                             if (serverHeader.encoding == GZIP && serverHeader.contentLength > 0) {
-                                uncompressSize = serverHeader.contentLength;
-                                uncompressed = malloc(sizeof(char) * uncompressSize);
+                                int uncompressSize = serverHeader.contentLength;
+                                char *uncompressed = malloc(sizeof(char) * uncompressSize);
                                 uncompressed = uncompressGzip(uncompressed, &uncompressSize, reqBuff.buff + serverHeader.headerLength, serverHeader.contentLength);
-                            }
-
-                            char *cur = uncompressed;
-                            if (strstr(cur, "<!DOCTYPE html") != NULL) {
-                                printf("Found HTML\n");
-                                while (true) {
-                                    char *img = strstr(cur, "<img");
-                                    if (img == NULL)
-                                        break;
-
-                                    char *endImg = strstr(img, ">");
-
-                                    char *srcStart = strstr(img, "src=");
-
-                                    if (srcStart == NULL)
-                                        printf("Img has no src\n");
-                                        
-                                    char *imgUrlStart = strstr(srcStart, "\"");
-                                    char *imgUrlEnd = strstr(imgUrlStart + 1, "\"");
-
-                                    int urlLen = (int)(imgUrlEnd - imgUrlStart) - 1;
-                                    char urlBuff[urlLen + 1];
-                                    memcpy(urlBuff, imgUrlStart + 1, urlLen);
-                                    urlBuff[urlLen] = '\0';
-
-                                    char domainBuff[64];
-                                    sscanf(urlBuff, "http://%[^/]", domainBuff);
-
-                                    char httpGetBuff[urlLen + 200];
-                                    int numChar = sprintf(httpGetBuff,
-                                                "GET %s HTTP/1.1\r\nHost: %s\r\n\r\n",
-                                                urlBuff,
-                                                domainBuff);
-
-                                    int imgSock = createServerSock(domainBuff, "80");
-                                    imageServers = addData(imageServers, createServerData(imgSock, urlBuff));
-
-                                    printf("Adding Image Serv: %d - %s\n", imgSock, urlBuff);
-                                   
-                                    write(imgSock, httpGetBuff, numChar);
-
-                                    if (fcntl(imgSock, F_SETFL,
-                                            fcntl(imgSock, F_GETFL, 0) | O_NONBLOCK) == -1) {
-                                        fprintf(stderr, "Error on fcntl()\n");
-                                    }
-
-                                    ev.events = EPOLLIN | EPOLLET;
-                                    ev.data.fd = imgSock;
-                                    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, imgSock, &ev) == -1) {
-                                        fprintf(stderr, "Error on epoll_ctl() on imgSock: %s\n", strerror(errno));
-                                    }
-
-                                    cur = endImg + 1;
-                                }
-                            }
-
-                            if (serverHeader.encoding == GZIP && serverHeader.contentLength > 0)
+                                prefetchImgTags(uncompressed, &imageServers, epollfd);
                                 free(uncompressed);
-
-                            // END Test Pre fetch code
+                            }
+                            else
+                                prefetchImgTags(reqBuff.buff, &imageServers, epollfd);
 
                             clientHeader.timeToLive = 60;
-
                             cache_add(&clientHeader, &serverHeader, responseSize,
                                       &reqBuff, cache);
 
@@ -598,6 +541,65 @@ int readBody(int sock, Header *header, DynamicArray *buffer) {
 
     return bodySize + 2;
 }
+
+
+void prefetchImgTags(char *html, DataList **imageServers, int epollfd) {
+    char *cur = html;
+
+    if (strstr(cur, "<!DOCTYPE html") != NULL) {
+        while (true) {
+            char *img = strstr(cur, "<img");
+            if (img == NULL)
+                break;
+            char *endImg = strstr(img, ">");
+            
+            char *srcStart = strstr(img, "src=");
+
+            if (srcStart == NULL)
+                continue; // Image has no source
+
+            // Extract image src between quotes
+            char *imgUrlStart = strstr(srcStart, "\"");
+            char *imgUrlEnd = strstr(imgUrlStart + 1, "\"");
+
+            int urlLen = (int)(imgUrlEnd - imgUrlStart) - 1;
+            char urlBuff[urlLen + 1];
+            memcpy(urlBuff, imgUrlStart + 1, urlLen);
+            urlBuff[urlLen] = '\0';
+
+            char domainBuff[64];
+            sscanf(urlBuff, "http://%[^/]", domainBuff);
+
+            char httpGetBuff[urlLen + 200];
+            int numChar = sprintf(httpGetBuff,
+                            "GET %s HTTP/1.1\r\nHost: %s\r\n\r\n",
+                            urlBuff,
+                            domainBuff);
+
+            int imgSock = createServerSock(domainBuff, "80");
+            (*imageServers) = addData(*imageServers, createServerData(imgSock, urlBuff));
+
+            printf("Adding Image Serv: %d - %s\n", imgSock, urlBuff);
+                                   
+            write(imgSock, httpGetBuff, numChar);
+
+            if (fcntl(imgSock, F_SETFL,
+                    fcntl(imgSock, F_GETFL, 0) | O_NONBLOCK) == -1) {
+                fprintf(stderr, "Error on fcntl()\n");
+            }
+
+            struct epoll_event ev;
+            ev.events = EPOLLIN | EPOLLET;
+            ev.data.fd = imgSock;
+            if (epoll_ctl(epollfd, EPOLL_CTL_ADD, imgSock, &ev) == -1) {
+                fprintf(stderr, "Error on epoll_ctl() on imgSock: %s\n", strerror(errno));
+            }
+
+            cur = endImg + 1;
+        }
+    }
+}
+
 
 void socketError(char *funcName) {
     fprintf(stderr, "%s Error: %s\n", funcName, strerror(errno));
