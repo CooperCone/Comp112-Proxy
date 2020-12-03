@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,18 +13,18 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
-#include <signal.h>
 
+// #include "compression.h"
 #include "cache.h"
 #include "dynamicArray.h"
 #include "httpData.h"
 
 /************ Proxy Helpers ************/
-int createClientSock(const char* port);
-int createServerSock(char* domain, char* port);
-bool parseHeader(Header* outHeader, DynamicArray* buff);
-int readBody(int sock, Header* header, DynamicArray* buffer);
-void socketError(char* funcName);
+int createClientSock(const char *port);
+int createServerSock(char *domain, char *port);
+bool parseHeader(Header *outHeader, DynamicArray *buff);
+int readBody(int sock, Header *header, DynamicArray *buffer);
+void socketError(char *funcName);
 /******************************************/
 
 #define MAX_EVENTS 100  // For epoll_wait()
@@ -50,9 +51,9 @@ typedef struct ServerData {
     struct ServerData *next, *prev;
 } ServerData;
 
-ConnectionData* addConnectionPair(ConnectionData* data, int first, int second);
-int findConnectionPair(ConnectionData* data, DynamicArray **out, int pair);
-ConnectionData* deleteConnectionPair(ConnectionData* data, int pair);
+ConnectionData *addConnectionPair(ConnectionData *data, int first, int second);
+int findConnectionPair(ConnectionData *data, DynamicArray **out, int pair);
+ConnectionData *deleteConnectionPair(ConnectionData *data, int pair);
 
 ClientData *addClientData(ClientData *data, int sock);
 ClientData *findClientData(ClientData *data, int sock);
@@ -63,7 +64,7 @@ ServerData *findServerDataBySock(ServerData *data, int sock);
 ServerData *findServerDataByDomain(ServerData *data, char *domain);
 ServerData *deleteServerData(ServerData *data, int sock);
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv) {
     int epollfd;
     struct epoll_event ev;                  // epoll_ctl()
     struct epoll_event events[MAX_EVENTS];  // epoll_wait()
@@ -74,7 +75,7 @@ int main(int argc, char** argv) {
     ClientData *clients = NULL;
     ServerData *servers = NULL;
 
-    signal(SIGPIPE, SIG_IGN); // ignore sigpipe, handle with write call
+    signal(SIGPIPE, SIG_IGN);  // ignore sigpipe, handle with write call
 
     if (argc != 2) {
         fprintf(stderr, "Invalid arguments!\n");
@@ -168,19 +169,21 @@ int main(int argc, char** argv) {
                 parseHeader(&clientHeader, &(clientData->buffer));
                 // TODO: do we need to read bodies for requests?
 
+                printf("Url: %s\n\n", clientHeader.url);
+
                 // TODO: should we handle POST differently?
                 if (clientHeader.method == POST) {
-                    close(clientConn); // TODO: remove from epoll
+                    close(clientConn);  // TODO: remove from epoll
                     da_clear(&clientData->buffer);
                     continue;
                 }
 
                 // Check to see if record is cached
-                CacheObj* record = cache_get(&clientHeader, cache);
+                CacheObj *record = cache_get(&clientHeader, cache);
                 if (record != NULL) {
                     printf("\nFound Data in cache\n");
 
-                    char* cur = record->data;
+                    char *cur = record->data;
                     write(clientConn, cur, strlen(cur));
                     // TOOD: Figure out a way to add the age to the header
                     // The old way didn't work because it's possible that we get
@@ -202,11 +205,10 @@ int main(int argc, char** argv) {
                 if (clientHeader.method == GET && (servData = findServerDataByDomain(servers, clientHeader.domain)) != NULL) {
                     serverSock = servData->sock;
                     printf("Reusing socket for %s\n", clientHeader.domain);
-                }
-                else {
+                } else {
                     printf("Opening new socket for %s:%s\n", clientHeader.domain, clientHeader.port);
                     if ((serverSock = createServerSock(clientHeader.domain,
-                                                   clientHeader.port)) == -1) {
+                                                       clientHeader.port)) == -1) {
                         close(clientConn);  // TODO: Handle this error more gracefully
                         continue;
                     }
@@ -217,9 +219,9 @@ int main(int argc, char** argv) {
                 // Connection successful
                 switch (clientHeader.method) {
                     case GET: {
-                        while (clientData->buffer.size > 0) {                            
+                        while (clientData->buffer.size > 0) {
                             int val = write(serverSock, clientData->buffer.buff, clientHeader.headerLength);
-                            if (val == -1) { // This means SIGPIPE
+                            if (val == -1) {  // This means SIGPIPE
                                 // Server closed, so open up a new one
                                 close(serverSock);
                                 servData = findServerDataBySock(servers, serverSock);
@@ -229,7 +231,7 @@ int main(int argc, char** argv) {
                                 servData->sock = serverSock;
                                 write(serverSock, clientData->buffer.buff, clientHeader.headerLength);
                             }
-                            
+
                             int servBytesRead = readAll(serverSock, &reqBuff);
 
                             if (servBytesRead == 0)
@@ -241,8 +243,45 @@ int main(int argc, char** argv) {
 
                             int responseSize = serverHeader.headerLength;
                             int bodySize = readBody(serverSock, &serverHeader,
-                                                    &reqBuff); 
+                                                    &reqBuff);
                             responseSize += bodySize;
+
+                            // TEST Pre fetch code
+                            char *uncompressed;
+                            int uncompressSize;
+                            if (serverHeader.encoding == GZIP && serverHeader.contentLength > 0) {
+                                uncompressSize = serverHeader.contentLength;
+                                uncompressed = malloc(sizeof(char) * uncompressSize);
+                                uncompressed = uncompressGzip(uncompressed, &uncompressSize, reqBuff.buff + serverHeader.headerLength, serverHeader.contentLength);
+                            }
+
+                            char *cur = uncompressed;
+                            if (strstr(cur, "<!DOCTYPE html") != NULL) {
+                                printf("Found HTML\n");
+                                while (true) {
+                                    char *img = strstr(cur, "<img");
+                                    if (img == NULL)
+                                        break;
+
+                                    char *endImg = strstr(img, ">");
+
+                                    char *srcStart = strstr(img, "src=");
+
+                                    if (srcStart == NULL)
+                                        printf("Img has no src\n");
+                                        
+                                    char *imgUrlStart = strstr(srcStart, "\"");
+                                    char *imgUrlEnd = strstr(imgUrlStart + 1, "\"");
+
+                                    write(1, imgUrlStart + 1, (int)(imgUrlEnd - imgUrlStart) - 1);
+                                    printf("\n");
+
+                                    cur = endImg + 1;
+                                }
+                            }
+
+                            if (serverHeader.encoding == GZIP && serverHeader.contentLength > 0)
+                                free(uncompressed);
 
                             clientHeader.timeToLive = 60;
 
@@ -287,7 +326,7 @@ int main(int argc, char** argv) {
 }
 
 /************ Proxy Helpers ****************/
-int createClientSock(const char* port) {
+int createClientSock(const char *port) {
     struct addrinfo hints, *proxyAddr;
 
     memset(&hints, 0, sizeof(struct sockaddr_in));
@@ -321,7 +360,7 @@ int createClientSock(const char* port) {
     return clientSock;
 }
 
-int createServerSock(char* domain, char* port) {
+int createServerSock(char *domain, char *port) {
     struct addrinfo hints, *serverInfo;
 
     memset(&hints, 0, sizeof(struct sockaddr_in));
@@ -353,13 +392,14 @@ int createServerSock(char* domain, char* port) {
     return serverSock;
 }
 
-bool parseHeader(Header* outHeader, DynamicArray* buff) {
+bool parseHeader(Header *outHeader, DynamicArray *buff) {
     outHeader->contentLength = -1;
     outHeader->chunkedEncoding = false;
+    outHeader->encoding = NO_ENCODE;
     int headerLen = 0;
 
     const char delim[] = "\r";
-    char* line = buff->buff;
+    char *line = buff->buff;
     unsigned long lineLen = strstr(line, delim) - line;
 
     while (line) {
@@ -374,9 +414,9 @@ bool parseHeader(Header* outHeader, DynamicArray* buff) {
             bool useSSL = connectStr != NULL;
             outHeader->method = useSSL ? CONNECT : GET;
 
-            char* getUrl = useSSL ? line + 8 : line + 4;
-            char* urlPortSep;
-            char* urlEnd;
+            char *getUrl = useSSL ? line + 8 : line + 4;
+            char *urlPortSep;
+            char *urlEnd;
             urlPortSep = strstr(strstr(getUrl, ":") + 1, ":");  // Second occurence
             if ((urlEnd = strstr(getUrl, " ")) == NULL) {
                 return false;
@@ -396,41 +436,46 @@ bool parseHeader(Header* outHeader, DynamicArray* buff) {
 
             memcpy(outHeader->url, getUrl, urlLen);
             outHeader->url[urlLen] = '\0';
-        } 
-        
-        char *postStr = strstr(line, "POST"); 
+        }
+
+        char *postStr = strstr(line, "POST");
         if (postStr != NULL && postStr - line <= lineLen) {
             outHeader->method = POST;
-        } 
-        
+        }
+
         char *hostStr = strstr(line, "Host: ");
         if (hostStr != NULL && hostStr - line <= lineLen) {
-            char* domain = line + 6;
-            char* portSep = strstr(domain, ":");
+            char *domain = line + 6;
+            char *portSep = strstr(domain, ":");
 
             int domainLen = (portSep - line) > lineLen ? lineLen - 6 : portSep - domain;
             memcpy(outHeader->domain, domain, domainLen);
             outHeader->domain[domainLen] = '\0';
         }
-        
+
         char *chunkStr = strstr(line, "Transfer-Encoding: chunked");
         if (chunkStr != NULL && chunkStr - line <= lineLen) {
             outHeader->chunkedEncoding = true;
-        } 
-        
+        }
+
         char *contentLenStr = strstr(line, "Content-Length: ");
         if (contentLenStr != NULL && contentLenStr - line <= lineLen) {
-            char* start = strstr(line, ":") + 2;
+            char *start = strstr(line, ":") + 2;
 
             int contentLength = atoi(start);
             outHeader->contentLength = contentLength;
         }
-        
+
+        char *encodingStr = strstr(line, "Content-Encoding: gzip");
+        if (encodingStr != NULL && encodingStr - line <= lineLen) {
+            outHeader->encoding = GZIP;
+        }
+
         if (outHeader->chunkedEncoding && atoi(line) != 0) {
             outHeader->headerLength = headerLen - lineLen;
             return true;
-        } 
-        
+        }
+
         if (lineLen == 0 || line - buff->buff + lineLen + 2 > buff->size) {
             if (headerLen > buff->size)
                 headerLen = buff->size;
@@ -450,7 +495,7 @@ bool parseHeader(Header* outHeader, DynamicArray* buff) {
     return true;
 }
 
-int readBody(int sock, Header* header, DynamicArray* buffer) {
+int readBody(int sock, Header *header, DynamicArray *buffer) {
     // A couple things could happen here.
     // If content length set, then just read content length
     // If chunked encoding, find chunk size and read chunks
@@ -460,7 +505,7 @@ int readBody(int sock, Header* header, DynamicArray* buffer) {
     int start = header->headerLength;
     while (header->chunkedEncoding) {
         // Figure out how many characters are in the chunk size
-        char* endOfChunkLine = strstr(buffer->buff + start, "\r\n");
+        char *endOfChunkLine = strstr(buffer->buff + start, "\r\n");
         int size = endOfChunkLine - (buffer->buff + start);
 
         // Get the chunk size string
@@ -503,7 +548,7 @@ int readBody(int sock, Header* header, DynamicArray* buffer) {
         }
         bodySize = header->contentLength - 2;
     }
-    
+
     if (!header->chunkedEncoding && header->contentLength == -1) {
         // while (true) {
         //     int bytesRead = readAll(sock, buffer);
@@ -518,14 +563,14 @@ int readBody(int sock, Header* header, DynamicArray* buffer) {
     return bodySize + 2;
 }
 
-void socketError(char* funcName) {
+void socketError(char *funcName) {
     fprintf(stderr, "%s Error: %s\n", funcName, strerror(errno));
     fprintf(stderr, "Exiting\n");
 }
 /****************************************************/
 
-ConnectionData* addConnectionPair(ConnectionData* data, int first, int second) {
-    ConnectionData* newData = malloc(sizeof(ConnectionData));
+ConnectionData *addConnectionPair(ConnectionData *data, int first, int second) {
+    ConnectionData *newData = malloc(sizeof(ConnectionData));
     newData->first = first;
     newData->second = second;
     newData->next = data;
@@ -533,37 +578,34 @@ ConnectionData* addConnectionPair(ConnectionData* data, int first, int second) {
     return newData;
 }
 
-int findConnectionPair(ConnectionData* data, DynamicArray **out, int pair) {
+int findConnectionPair(ConnectionData *data, DynamicArray **out, int pair) {
     if (data == NULL)
         return -1;
     else if (data->first == pair) {
         *out = &data->buffer;
         return data->second;
-    }
-    else if (data->second == pair) {
+    } else if (data->second == pair) {
         *out = &data->buffer;
         return data->first;
-    }
-    else
+    } else
         return findConnectionPair(data->next, out, pair);
 }
 
-ConnectionData* deleteConnectionPair(ConnectionData* data, int pair) {
+ConnectionData *deleteConnectionPair(ConnectionData *data, int pair) {
     if (data == NULL)
         return NULL;
     else if (data->first == pair || data->second == pair) {
         // TODO: Should we close sockets here?
-        ConnectionData* next = data->next;
+        ConnectionData *next = data->next;
         da_term(&data->buffer);
         free(data);
         return next;
     } else {
-        ConnectionData* next = deleteConnectionPair(data->next, pair);
+        ConnectionData *next = deleteConnectionPair(data->next, pair);
         data->next = next;
         return data;
     }
 }
-
 
 ClientData *addClientData(ClientData *data, int sock) {
     ClientData *newData = malloc(sizeof(ClientData));
@@ -573,15 +615,14 @@ ClientData *addClientData(ClientData *data, int sock) {
     return newData;
 }
 
-
 ClientData *findClientData(ClientData *data, int sock) {
     if (data == NULL)
         return NULL;
     else if (data->sock = sock)
         return data;
-    else return findClientData(data->next, sock);
+    else
+        return findClientData(data->next, sock);
 }
-
 
 ClientData *deleteClientData(ClientData *data, int sock) {
     if (data == NULL)
@@ -591,14 +632,12 @@ ClientData *deleteClientData(ClientData *data, int sock) {
         ClientData *next = data->next;
         free(data);
         return next;
-    }
-    else {
+    } else {
         ClientData *next = deleteClientData(data->next, sock);
         data->next = next;
         return data;
     }
 }
-
 
 ServerData *addServerData(ServerData *data, int sock, int dest, char *domain) {
     ServerData *newData = malloc(sizeof(ServerData));
@@ -638,8 +677,7 @@ ServerData *deleteServerData(ServerData *data, int sock) {
         free(data->domain);
         free(data);
         return next;
-    }
-    else {
+    } else {
         ServerData *next = deleteServerData(data->next, sock);
         data->next = next;
         return data;
