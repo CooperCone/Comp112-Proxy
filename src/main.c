@@ -30,51 +30,6 @@ void socketError(char *funcName);
 #define MAX_EVENTS 100  // For epoll_wait()
 #define LOOP_SIZE 12    // Should be infinite theoretically, but this is for testing
 
-typedef struct ConnectionData {
-    int first;
-    int second;
-    DynamicArray buffer;
-    struct ConnectionData *next;
-} ConnectionData;
-
-typedef struct ClientData {
-    int sock;
-    DynamicArray buffer;
-    struct ClientData *next;
-} ClientData;
-
-typedef struct ServerData {
-    char *domain;
-    int sock;
-    int dest;
-    DynamicArray buffer;
-    struct ServerData *next, *prev;
-} ServerData;
-
-typedef struct PrefetchContent {
-    char *url;
-    char *content;
-    int contentLen;
-    struct PrefetchContent *next;
-} PrefetchContent;
-
-// TODO: Refactor these so they are all the same with void pointers
-
-ConnectionData *addConnectionPair(ConnectionData *data, int first, int second);
-int findConnectionPair(ConnectionData *data, DynamicArray **out, int pair);
-ConnectionData *deleteConnectionPair(ConnectionData *data, int pair);
-
-ClientData *addClientData(ClientData *data, int sock);
-ClientData *findClientData(ClientData *data, int sock);
-ClientData *deleteClientData(ClientData *data, int sock);
-
-ServerData *addServerData(ServerData *data, int sock, int dest, char *domain);
-ServerData *findServerDataBySock(ServerData *data, int sock);
-ServerData *findServerDataByDomain(ServerData *data, char *domain);
-ServerData *deleteServerData(ServerData *data, int sock);
-
-PrefetchContent *removePrefetchContent(PrefetchContent *data, char *url);
-
 int main(int argc, char **argv) {
     int epollfd;
     struct epoll_event ev;                  // epoll_ctl()
@@ -82,12 +37,12 @@ int main(int argc, char **argv) {
     int lc;                                 // loop counter
     int n, nfds;
 
-    ConnectionData *connections = NULL;
-    ClientData *clients = NULL;
-    ServerData *servers = NULL;
+    DataList *connections = NULL; // ConnectionData
+    DataList *clients = NULL; // ClientData
+    DataList *servers = NULL; // ServerData
 
-    PrefetchContent *images = NULL;
-    ServerData *imageServers = NULL;
+    DataList *images = NULL; // PrefetchData
+    DataList *imageServers = NULL; // ServerData
 
     signal(SIGPIPE, SIG_IGN);  // ignore sigpipe, handle with write call
 
@@ -153,7 +108,7 @@ int main(int argc, char **argv) {
                     fprintf(stderr, "Error on fcntl()\n");
                 }
 
-                clients = addClientData(clients, clientConn);
+                clients = addData(clients, createClientData(clientConn));
 
                 // Register the clientConn socket to the epoll instance
                 ev.events = EPOLLIN | EPOLLET;
@@ -166,18 +121,21 @@ int main(int argc, char **argv) {
 
                 // First check to see if it's an active connection
                 // If so, forward data between
-                DynamicArray *connectionBuff;
-                int otherSock = findConnectionPair(connections, &connectionBuff, clientConn);
-                if (otherSock != -1) {
-                    int bytesRead = readAll(clientConn, connectionBuff);
+                DataList *connDl = findData(connections, (CmpFunc)connSockCmp, &clientConn);
+                if (connDl) {
+                    ConnectionData *connData = connDl->data;
+                    DynamicArray connectionBuff = connData->buffer;
+                    int otherSock = connData->first == clientConn ? connData->second : connData->first;
+                    int bytesRead = readAll(clientConn, &connectionBuff);
 
-                    write(otherSock, connectionBuff->buff, connectionBuff->size);
-                    da_clear(connectionBuff);
+                    write(otherSock, connectionBuff.buff, connectionBuff.size);
+                    da_clear(&connectionBuff);
                     continue;
                 }
 
-                ServerData *imgData = findServerDataBySock(imageServers, clientConn);
-                if (imgData != NULL) {
+                DataList *imgServDl = findData(imageServers, (CmpFunc)servSockCmp, &clientConn);
+                if (imgServDl != NULL) {
+                    ServerData *imgData = imgServDl->data;
                     printf("%d - Received Image For: %s\n", clientConn, imgData->domain);
 
                     int amt = readAll(clientConn, &reqBuff);
@@ -186,21 +144,7 @@ int main(int argc, char **argv) {
                     parseHeader(&imgHeader, &reqBuff);
                     readBody(clientConn, &imgHeader, &reqBuff);
 
-                    // printf("Read %d bytes\n\n", reqBuff.size);
-                    // write(1, reqBuff.buff, imgHeader.headerLength);
-                    // printf("\n\n");
-
-                    printf("Image - Buff: %d, Header: %d\n", reqBuff.size, imgHeader.headerLength);
-                    write(1, reqBuff.buff, imgHeader.headerLength);
-
-                    PrefetchContent *imgContent = malloc(sizeof(PrefetchContent));
-                    imgContent->url = malloc(strlen(imgData->domain) + 1);
-                    strcpy(imgContent->url, imgData->domain);
-                    imgContent->content = malloc(reqBuff.size);
-                    memcpy(imgContent->content, reqBuff.buff, reqBuff.size);
-                    imgContent->contentLen = reqBuff.size;
-                    imgContent->next = images;
-                    images = imgContent;
+                    images = addData(images, createPrefetchData(imgData->domain, &reqBuff));
 
                     da_clear(&reqBuff);
                     if (epoll_ctl(epollfd, EPOLL_CTL_DEL, clientConn, NULL) == -1) {
@@ -208,11 +152,12 @@ int main(int argc, char **argv) {
                     }
                     close(clientConn);
 
-                    imageServers = deleteServerData(imageServers, clientConn);
+                    imageServers = deleteData(imageServers, (CmpFunc)servSockCmp, &clientConn, (TermFunc)termServerData);
                     continue;
                 }
 
-                ClientData *clientData = findClientData(clients, clientConn);
+                // This can throw an error if clients doesn't contain clientConn
+                ClientData *clientData = findData(clients, (CmpFunc)clientSockCmp, &clientConn)->data;
                 int bytesRead = readAll(clientConn, &(clientData->buffer));
 
                 Header clientHeader;
@@ -229,23 +174,16 @@ int main(int argc, char **argv) {
                 }
 
                 // Check to see if record is an image that was already received
-                PrefetchContent *imgContent = images;
-                bool foundImg = false;
-                while (imgContent != NULL) {
-                    if (strcmp(imgContent->url, clientHeader.url) == 0) {
-                        write(clientConn, imgContent->content, imgContent->contentLen);
-                        images = removePrefetchContent(images, clientHeader.url);
-                        printf("Send %s to client of size %d. Continuing\n", clientHeader.url, imgContent->contentLen);
-                        foundImg = true;
-                        da_clear(&clientData->buffer);
-                        break;
-                    }
-
-                    imgContent = imgContent->next;
+                DataList *imgDl = findData(images, (CmpFunc)prefetchUrlCmp, clientHeader.url);
+                if (imgDl) {
+                    PrefetchData *imgData = imgDl->data;
+                    printf("Send %s to client of size %d. Continuing\n", clientHeader.url, imgData->contentLen);
+                    write(clientConn, imgData->content, imgData->contentLen);
+                    
+                    images = deleteData(images, (CmpFunc)prefetchUrlCmp, clientHeader.url, (TermFunc)termPrefetchData);
+                    da_clear(&clientData->buffer);
+                    break;
                 }
-
-                if (foundImg)
-                    continue;
 
                 // Check to see if record is cached
                 CacheObj *record = cache_get(&clientHeader, cache);
@@ -260,8 +198,6 @@ int main(int argc, char **argv) {
                     // filled in
 
                     record->lastAccess = time(NULL);
-                    // close(clientConn);
-                    // da_clear(&getBuff);
                     da_clear(&clientData->buffer);
                     continue;
                 }
@@ -270,9 +206,9 @@ int main(int argc, char **argv) {
                 // or it was stale
                 // So connect to the server, and send them the request
                 int serverSock;
-                ServerData *servData;
-                if (clientHeader.method == GET && (servData = findServerDataByDomain(servers, clientHeader.domain)) != NULL) {
-                    serverSock = servData->sock;
+                DataList *servDl;
+                if (clientHeader.method == GET && (servDl = findData(servers, (CmpFunc)servDomainCmp, clientHeader.domain)) != NULL) {
+                    serverSock = ((ServerData*)servDl->data)->sock;
                     printf("Reusing socket for %s\n", clientHeader.domain);
                 } else {
                     printf("Opening new socket for %s:%s\n", clientHeader.domain, clientHeader.port);
@@ -281,9 +217,10 @@ int main(int argc, char **argv) {
                         close(clientConn);  // TODO: Handle this error more gracefully
                         continue;
                     }
-                    servers = addServerData(servers, serverSock, -1, clientHeader.domain);
-                    servData = servers;
+                    servers = addData(servers, createServerData(serverSock, clientHeader.domain));
+                    servDl = servers;
                 }
+                ServerData *servData = servDl->data;
 
                 // Connection successful
                 switch (clientHeader.method) {
@@ -293,7 +230,6 @@ int main(int argc, char **argv) {
                             if (val == -1) {  // This means SIGPIPE
                                 // Server closed, so open up a new one
                                 close(serverSock);
-                                servData = findServerDataBySock(servers, serverSock);
                                 serverSock = createServerSock(clientHeader.domain, clientHeader.port);
                                 if (serverSock == -1)
                                     break;
@@ -358,7 +294,7 @@ int main(int argc, char **argv) {
                                                 domainBuff);
 
                                     int imgSock = createServerSock(domainBuff, "80");
-                                    imageServers = addServerData(imageServers, imgSock, -1, urlBuff);
+                                    imageServers = addData(imageServers, createServerData(imgSock, urlBuff));
 
                                     printf("Adding Image Serv: %d - %s\n", imgSock, urlBuff);
                                    
@@ -392,7 +328,6 @@ int main(int argc, char **argv) {
                             write(clientConn, reqBuff.buff, reqBuff.size);
 
                             da_clear(&reqBuff);
-                            // printf("Buffer Size %d - Amount %d\n", clientData->buffer.size, clientHeader.headerLength);
                             da_shift(&(clientData->buffer), clientHeader.headerLength);
                         }
                         break;
@@ -401,8 +336,8 @@ int main(int argc, char **argv) {
                         char ok[] = "HTTP/1.1 200 OK\r\n\r\n";
                         write(clientConn, ok, strlen(ok));
 
-                        clients = deleteClientData(clients, clientConn);
-                        connections = addConnectionPair(connections, clientConn, serverSock);
+                        clients = deleteData(clients, (CmpFunc)clientSockCmp, &clientConn, (TermFunc)termClientData);
+                        connections = addData(connections, createConnectionData(clientConn, serverSock));
 
                         ev.events = EPOLLIN | EPOLLET;
                         ev.data.fd = serverSock;
@@ -669,135 +604,3 @@ void socketError(char *funcName) {
     fprintf(stderr, "Exiting\n");
 }
 /****************************************************/
-
-ConnectionData *addConnectionPair(ConnectionData *data, int first, int second) {
-    ConnectionData *newData = malloc(sizeof(ConnectionData));
-    newData->first = first;
-    newData->second = second;
-    newData->next = data;
-    da_init(&newData->buffer, 2048);
-    return newData;
-}
-
-int findConnectionPair(ConnectionData *data, DynamicArray **out, int pair) {
-    if (data == NULL)
-        return -1;
-    else if (data->first == pair) {
-        *out = &data->buffer;
-        return data->second;
-    } else if (data->second == pair) {
-        *out = &data->buffer;
-        return data->first;
-    } else
-        return findConnectionPair(data->next, out, pair);
-}
-
-ConnectionData *deleteConnectionPair(ConnectionData *data, int pair) {
-    if (data == NULL)
-        return NULL;
-    else if (data->first == pair || data->second == pair) {
-        // TODO: Should we close sockets here?
-        ConnectionData *next = data->next;
-        da_term(&data->buffer);
-        free(data);
-        return next;
-    } else {
-        ConnectionData *next = deleteConnectionPair(data->next, pair);
-        data->next = next;
-        return data;
-    }
-}
-
-ClientData *addClientData(ClientData *data, int sock) {
-    ClientData *newData = malloc(sizeof(ClientData));
-    newData->sock = sock;
-    newData->next = data;
-    da_init(&(newData->buffer), 2048);
-    return newData;
-}
-
-ClientData *findClientData(ClientData *data, int sock) {
-    if (data == NULL)
-        return NULL;
-    else if (data->sock = sock)
-        return data;
-    else
-        return findClientData(data->next, sock);
-}
-
-ClientData *deleteClientData(ClientData *data, int sock) {
-    if (data == NULL)
-        return NULL;
-    else if (data->sock == sock) {
-        da_term(&(data->buffer));
-        ClientData *next = data->next;
-        free(data);
-        return next;
-    } else {
-        ClientData *next = deleteClientData(data->next, sock);
-        data->next = next;
-        return data;
-    }
-}
-
-ServerData *addServerData(ServerData *data, int sock, int dest, char *domain) {
-    ServerData *newData = malloc(sizeof(ServerData));
-    da_init(&(newData->buffer), 2048);
-    newData->domain = malloc(sizeof(char) + strlen(domain) + 1);
-    strcpy(newData->domain, domain);
-    newData->sock = sock;
-    newData->dest = dest;
-    newData->next = data;
-    return newData;
-}
-
-ServerData *findServerDataBySock(ServerData *data, int sock) {
-    if (data == NULL)
-        return data;
-    else if (data->sock == sock)
-        return data;
-    else
-        return findServerDataBySock(data->next, sock);
-}
-
-ServerData *findServerDataByDomain(ServerData *data, char *domain) {
-    if (data == NULL)
-        return data;
-    else if (strcmp(data->domain, domain) == 0)
-        return data;
-    else
-        return findServerDataByDomain(data->next, domain);
-}
-
-ServerData *deleteServerData(ServerData *data, int sock) {
-    if (data == NULL)
-        return data;
-    else if (data->sock == sock) {
-        ServerData *next = data->next;
-        da_term(&(data->buffer));
-        free(data->domain);
-        free(data);
-        return next;
-    } else {
-        ServerData *next = deleteServerData(data->next, sock);
-        data->next = next;
-        return data;
-    }
-}
-
-PrefetchContent *removePrefetchContent(PrefetchContent *data, char *url) {
-    if (data == NULL)
-        return NULL;
-    else if (strcmp(url, data->url) == 0) {
-        PrefetchContent *next = data->next;
-        free(data->content);
-        free(data->url);
-        free(data);
-        return next;
-    }
-    else {
-        PrefetchContent *next = removePrefetchContent(data->next, url);
-        data->next = next;
-        return data;
-    }
-}
