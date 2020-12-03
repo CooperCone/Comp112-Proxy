@@ -67,3 +67,20 @@ age field when the response adds in, we apply the age by subtracting it from
 timeCreated in our cacheObj. For all writes back to the client, we add age field
 at the end of the header, no matter what (i.e. even when we send it right from
 the server).
+
+-- cooper (Dec 3rd 11:49)
+
+Added image pre-fetching. When we receive a GET request, we check to see if the
+content returned is HTML. If it is, we search for img tags and send a GET 
+request to the image servers so the client doesn't need to wait so long
+before they get the images back. When the image servers respond, we cache the
+content in another data structure and send them to the client when they ask.
+Before we look for the img tags, we need to make sure the data isn't compressed.
+If it's compressed with gzip, we uncompress it then search for the tags.
+We don't handle any other compression techniques right now.
+
+I also refactored some of the data we were storing. We had about 5 different
+structs that were all linked lists with some data attached. They had different 
+implementations of add, remove, find, and length. I changed this to 1 DataList
+struct that stores a void* data field. Now the other structs only need to
+handle creating and destroying themselves and comparison functions.
