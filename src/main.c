@@ -51,6 +51,15 @@ typedef struct ServerData {
     struct ServerData *next, *prev;
 } ServerData;
 
+typedef struct PrefetchContent {
+    char *url;
+    char *content;
+    int contentLen;
+    struct PrefetchContent *next;
+} PrefetchContent;
+
+// TODO: Refactor these so they are all the same with void pointers
+
 ConnectionData *addConnectionPair(ConnectionData *data, int first, int second);
 int findConnectionPair(ConnectionData *data, DynamicArray **out, int pair);
 ConnectionData *deleteConnectionPair(ConnectionData *data, int pair);
@@ -64,6 +73,8 @@ ServerData *findServerDataBySock(ServerData *data, int sock);
 ServerData *findServerDataByDomain(ServerData *data, char *domain);
 ServerData *deleteServerData(ServerData *data, int sock);
 
+PrefetchContent *removePrefetchContent(PrefetchContent *data, char *url);
+
 int main(int argc, char **argv) {
     int epollfd;
     struct epoll_event ev;                  // epoll_ctl()
@@ -74,6 +85,9 @@ int main(int argc, char **argv) {
     ConnectionData *connections = NULL;
     ClientData *clients = NULL;
     ServerData *servers = NULL;
+
+    PrefetchContent *images = NULL;
+    ServerData *imageServers = NULL;
 
     signal(SIGPIPE, SIG_IGN);  // ignore sigpipe, handle with write call
 
@@ -162,6 +176,42 @@ int main(int argc, char **argv) {
                     continue;
                 }
 
+                ServerData *imgData = findServerDataBySock(imageServers, clientConn);
+                if (imgData != NULL) {
+                    printf("%d - Received Image For: %s\n", clientConn, imgData->domain);
+
+                    int amt = readAll(clientConn, &reqBuff);
+
+                    Header imgHeader;
+                    parseHeader(&imgHeader, &reqBuff);
+                    readBody(clientConn, &imgHeader, &reqBuff);
+
+                    // printf("Read %d bytes\n\n", reqBuff.size);
+                    // write(1, reqBuff.buff, imgHeader.headerLength);
+                    // printf("\n\n");
+
+                    printf("Image - Buff: %d, Header: %d\n", reqBuff.size, imgHeader.headerLength);
+                    write(1, reqBuff.buff, imgHeader.headerLength);
+
+                    PrefetchContent *imgContent = malloc(sizeof(PrefetchContent));
+                    imgContent->url = malloc(strlen(imgData->domain) + 1);
+                    strcpy(imgContent->url, imgData->domain);
+                    imgContent->content = malloc(reqBuff.size);
+                    memcpy(imgContent->content, reqBuff.buff, reqBuff.size);
+                    imgContent->contentLen = reqBuff.size;
+                    imgContent->next = images;
+                    images = imgContent;
+
+                    da_clear(&reqBuff);
+                    if (epoll_ctl(epollfd, EPOLL_CTL_DEL, clientConn, NULL) == -1) {
+                        fprintf(stderr, "Error on epoll_ctl() delete on clientConn %s\n", strerror(errno));
+                    }
+                    close(clientConn);
+
+                    imageServers = deleteServerData(imageServers, clientConn);
+                    continue;
+                }
+
                 ClientData *clientData = findClientData(clients, clientConn);
                 int bytesRead = readAll(clientConn, &(clientData->buffer));
 
@@ -177,6 +227,25 @@ int main(int argc, char **argv) {
                     da_clear(&clientData->buffer);
                     continue;
                 }
+
+                // Check to see if record is an image that was already received
+                PrefetchContent *imgContent = images;
+                bool foundImg = false;
+                while (imgContent != NULL) {
+                    if (strcmp(imgContent->url, clientHeader.url) == 0) {
+                        write(clientConn, imgContent->content, imgContent->contentLen);
+                        images = removePrefetchContent(images, clientHeader.url);
+                        printf("Send %s to client of size %d. Continuing\n", clientHeader.url, imgContent->contentLen);
+                        foundImg = true;
+                        da_clear(&clientData->buffer);
+                        break;
+                    }
+
+                    imgContent = imgContent->next;
+                }
+
+                if (foundImg)
+                    continue;
 
                 // Check to see if record is cached
                 CacheObj *record = cache_get(&clientHeader, cache);
@@ -247,6 +316,7 @@ int main(int argc, char **argv) {
                             responseSize += bodySize;
 
                             // TEST Pre fetch code
+
                             char *uncompressed;
                             int uncompressSize;
                             if (serverHeader.encoding == GZIP && serverHeader.contentLength > 0) {
@@ -273,8 +343,37 @@ int main(int argc, char **argv) {
                                     char *imgUrlStart = strstr(srcStart, "\"");
                                     char *imgUrlEnd = strstr(imgUrlStart + 1, "\"");
 
-                                    write(1, imgUrlStart + 1, (int)(imgUrlEnd - imgUrlStart) - 1);
-                                    printf("\n");
+                                    int urlLen = (int)(imgUrlEnd - imgUrlStart) - 1;
+                                    char urlBuff[urlLen + 1];
+                                    memcpy(urlBuff, imgUrlStart + 1, urlLen);
+                                    urlBuff[urlLen] = '\0';
+
+                                    char domainBuff[64];
+                                    sscanf(urlBuff, "http://%[^/]", domainBuff);
+
+                                    char httpGetBuff[urlLen + 200];
+                                    int numChar = sprintf(httpGetBuff,
+                                                "GET %s HTTP/1.1\r\nHost: %s\r\n\r\n",
+                                                urlBuff,
+                                                domainBuff);
+
+                                    int imgSock = createServerSock(domainBuff, "80");
+                                    imageServers = addServerData(imageServers, imgSock, -1, urlBuff);
+
+                                    printf("Adding Image Serv: %d - %s\n", imgSock, urlBuff);
+                                   
+                                    write(imgSock, httpGetBuff, numChar);
+
+                                    if (fcntl(imgSock, F_SETFL,
+                                            fcntl(imgSock, F_GETFL, 0) | O_NONBLOCK) == -1) {
+                                        fprintf(stderr, "Error on fcntl()\n");
+                                    }
+
+                                    ev.events = EPOLLIN | EPOLLET;
+                                    ev.data.fd = imgSock;
+                                    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, imgSock, &ev) == -1) {
+                                        fprintf(stderr, "Error on epoll_ctl() on imgSock: %s\n", strerror(errno));
+                                    }
 
                                     cur = endImg + 1;
                                 }
@@ -282,6 +381,8 @@ int main(int argc, char **argv) {
 
                             if (serverHeader.encoding == GZIP && serverHeader.contentLength > 0)
                                 free(uncompressed);
+
+                            // END Test Pre fetch code
 
                             clientHeader.timeToLive = 60;
 
@@ -679,6 +780,23 @@ ServerData *deleteServerData(ServerData *data, int sock) {
         return next;
     } else {
         ServerData *next = deleteServerData(data->next, sock);
+        data->next = next;
+        return data;
+    }
+}
+
+PrefetchContent *removePrefetchContent(PrefetchContent *data, char *url) {
+    if (data == NULL)
+        return NULL;
+    else if (strcmp(url, data->url) == 0) {
+        PrefetchContent *next = data->next;
+        free(data->content);
+        free(data->url);
+        free(data);
+        return next;
+    }
+    else {
+        PrefetchContent *next = removePrefetchContent(data->next, url);
         data->next = next;
         return data;
     }
