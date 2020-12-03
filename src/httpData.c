@@ -129,6 +129,14 @@ DataList *deleteData(DataList *list, bool (*cmp)(void *a, void *b), void *data, 
 }
 
 
+int dataListLength(DataList *list) {
+    if (list == NULL)
+        return 0;
+    else
+        return 1 + dataListLength(list->next);
+}
+
+
 char *uncompressGzip(char *outBuff, int *outSize, char *inBuff, int inSize) {
     int chunkSize = *outSize;
     int uncomSize = 0;

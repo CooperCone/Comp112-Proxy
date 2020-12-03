@@ -125,19 +125,24 @@ int main(int argc, char **argv) {
                 DataList *connDl = findData(connections, (CmpFunc)connSockCmp, &clientConn);
                 if (connDl) {
                     ConnectionData *connData = connDl->data;
-                    DynamicArray connectionBuff = connData->buffer;
                     int otherSock = connData->first == clientConn ? connData->second : connData->first;
-                    int bytesRead = readAll(clientConn, &connectionBuff);
+                    int bytesRead = readAll(clientConn, &(connData->buffer));
 
-                    write(otherSock, connectionBuff.buff, connectionBuff.size);
-                    da_clear(&connectionBuff);
+                    if (bytesRead == -1) {
+                        printf("\n\n----------------------------------------------------------\n\n");
+                        // TODO: Close https connections
+                    }
+
+                    write(otherSock, connData->buffer.buff, connData->buffer.size);
+                    da_clear(&(connData->buffer));
                     continue;
                 }
+
 
                 DataList *imgServDl = findData(imageServers, (CmpFunc)servSockCmp, &clientConn);
                 if (imgServDl != NULL) {
                     ServerData *imgData = imgServDl->data;
-                    printf("%d - Received Image For: %s\n", clientConn, imgData->domain);
+                    // printf("%d - Received Image For: %s\n", clientConn, imgData->domain);
 
                     int amt = readAll(clientConn, &reqBuff);
 
@@ -165,68 +170,69 @@ int main(int argc, char **argv) {
                 parseHeader(&clientHeader, &(clientData->buffer));
                 // TODO: do we need to read bodies for requests?
 
-                printf("Url: %s\n", clientHeader.url);
+                do {
+                    printf("Client Url: %s\n", clientHeader.url);
 
-                // TODO: should we handle POST differently?
-                if (clientHeader.method == POST) {
-                    close(clientConn);  // TODO: remove from epoll
-                    da_clear(&clientData->buffer);
-                    continue;
-                }
-
-                // Check to see if record is an image that was already received
-                DataList *imgDl = findData(images, (CmpFunc)prefetchUrlCmp, clientHeader.url);
-                if (imgDl) {
-                    PrefetchData *imgData = imgDl->data;
-                    printf("Send %s to client of size %d. Continuing\n", clientHeader.url, imgData->contentLen);
-                    write(clientConn, imgData->content, imgData->contentLen);
-                    
-                    images = deleteData(images, (CmpFunc)prefetchUrlCmp, clientHeader.url, (TermFunc)termPrefetchData);
-                    da_clear(&clientData->buffer);
-                    break;
-                }
-
-                // Check to see if record is cached
-                CacheObj *record = cache_get(&clientHeader, cache);
-                if (record != NULL) {
-                    printf("\nFound Data in cache\n");
-
-                    char *cur = record->data;
-                    write(clientConn, cur, strlen(cur));
-                    // TOOD: Figure out a way to add the age to the header
-                    // The old way didn't work because it's possible that we get
-                    // a header from a website with the age header already
-                    // filled in
-
-                    record->lastAccess = time(NULL);
-                    da_clear(&clientData->buffer);
-                    continue;
-                }
-
-                // If we get to this point, either the key wasn't in the cache,
-                // or it was stale
-                // So connect to the server, and send them the request
-                int serverSock;
-                DataList *servDl;
-                if (clientHeader.method == GET && (servDl = findData(servers, (CmpFunc)servDomainCmp, clientHeader.domain)) != NULL) {
-                    serverSock = ((ServerData*)servDl->data)->sock;
-                    printf("Reusing socket for %s\n\n", clientHeader.domain);
-                } else {
-                    printf("Opening new socket for %s:%s\n", clientHeader.domain, clientHeader.port);
-                    if ((serverSock = createServerSock(clientHeader.domain,
-                                                       clientHeader.port)) == -1) {
-                        close(clientConn);  // TODO: Handle this error more gracefully
+                    // TODO: should we handle POST differently?
+                    if (clientHeader.method == POST) {
+                        // close(clientConn);  // TODO: remove from epoll
+                        int bodyLen = readBody(clientConn, &clientHeader, &(clientData->buffer));
+                        da_shift(&(clientData->buffer), clientHeader.headerLength + bodyLen);
                         continue;
                     }
-                    servers = addData(servers, createServerData(serverSock, clientHeader.domain));
-                    servDl = servers;
-                }
-                ServerData *servData = servDl->data;
 
-                // Connection successful
-                switch (clientHeader.method) {
-                    case GET: {
-                        while (clientData->buffer.size > 0) {
+                    // Check to see if record is an image that was already received
+                    DataList *imgDl = findData(images, (CmpFunc)prefetchUrlCmp, clientHeader.url);
+                    if (imgDl) {
+                        PrefetchData *imgData = imgDl->data;
+                        printf("Found Url in Prefetch Images\n\n");
+                        write(clientConn, imgData->content, imgData->contentLen);
+                        
+                        images = deleteData(images, (CmpFunc)prefetchUrlCmp, clientHeader.url, (TermFunc)termPrefetchData);
+                        da_shift(&(clientData->buffer), clientHeader.headerLength);
+                        continue;
+                    }
+
+                    // Check to see if record is cached
+                    CacheObj *record = cache_get(&clientHeader, cache);
+                    if (record != NULL) {
+                        printf("Found Data in cache\n\n");
+
+                        char *cur = record->data;
+                        write(clientConn, cur, strlen(cur));
+                        // TOOD: Figure out a way to add the age to the header
+                        // The old way didn't work because it's possible that we get
+                        // a header from a website with the age header already
+                        // filled in
+
+                        record->lastAccess = time(NULL);
+                        da_shift(&clientData->buffer, clientHeader.headerLength);
+                        continue;
+                    }
+
+                    // If we get to this point, either the key wasn't in the cache,
+                    // or it was stale
+                    // So connect to the server, and send them the request
+                    int serverSock;
+                    DataList *servDl;
+                    if (clientHeader.method == GET && (servDl = findData(servers, (CmpFunc)servDomainCmp, clientHeader.domain)) != NULL) {
+                        serverSock = ((ServerData*)servDl->data)->sock;
+                        printf("Reusing socket for %s\n", clientHeader.domain);
+                    } else {
+                        printf("Opening new socket for %s:%s\n", clientHeader.domain, clientHeader.port);
+                        if ((serverSock = createServerSock(clientHeader.domain,
+                                                        clientHeader.port)) == -1) {
+                            close(clientConn);  // TODO: Handle this error more gracefully
+                            continue;
+                        }
+                        servers = addData(servers, createServerData(serverSock, clientHeader.domain));
+                        servDl = servers;
+                    }
+                    ServerData *servData = servDl->data;
+
+                    // Connection successful
+                    switch (clientHeader.method) {
+                        case GET: {
                             int val = write(serverSock, clientData->buffer.buff, clientHeader.headerLength);
                             if (val == -1) {  // This means SIGPIPE
                                 // Server closed, so open up a new one
@@ -246,6 +252,8 @@ int main(int argc, char **argv) {
                             Header serverHeader;
                             memset(&serverHeader, 0, sizeof(Header));
                             parseHeader(&serverHeader, &reqBuff);
+
+                            printf("Sending Data to client\n\n");
 
                             int responseSize = serverHeader.headerLength;
                             int bodySize = readBody(serverSock, &serverHeader,
@@ -271,26 +279,35 @@ int main(int argc, char **argv) {
                             write(clientConn, reqBuff.buff, reqBuff.size);
 
                             da_clear(&reqBuff);
-                            da_shift(&(clientData->buffer), clientHeader.headerLength);
+                            break;
                         }
-                        break;
-                    }
-                    case CONNECT: {
-                        char ok[] = "HTTP/1.1 200 OK\r\n\r\n";
-                        write(clientConn, ok, strlen(ok));
+                        case CONNECT: {
+                            char ok[] = "HTTP/1.1 200 OK\r\n\r\n";
+                            write(clientConn, ok, strlen(ok));
 
-                        clients = deleteData(clients, (CmpFunc)clientSockCmp, &clientConn, (TermFunc)termClientData);
-                        connections = addData(connections, createConnectionData(clientConn, serverSock));
+                            clients = deleteData(clients, (CmpFunc)clientSockCmp, &clientConn, (TermFunc)termClientData);
+                            connections = addData(connections, createConnectionData(clientConn, serverSock));
 
-                        ev.events = EPOLLIN | EPOLLET;
-                        ev.data.fd = serverSock;
-                        if (epoll_ctl(epollfd, EPOLL_CTL_ADD, serverSock, &ev) == -1) {
-                            fprintf(stderr, "Error on epoll_ctl() on serverSock: %s\n", strerror(errno));
+                            ev.events = EPOLLIN | EPOLLET;
+                            ev.data.fd = serverSock;
+                            if (epoll_ctl(epollfd, EPOLL_CTL_ADD, serverSock, &ev) == -1) {
+                                fprintf(stderr, "Error on epoll_ctl() on serverSock: %s\n", strerror(errno));
+                            }
+
+                            break;
                         }
-                    }
-                }  // switch
+                    }  // switch
 
-                da_clear(&reqBuff);
+                    da_clear(&reqBuff);
+
+                    DataList *lst = findData(clients, (CmpFunc)clientSockCmp, &clientConn);
+                    if (lst) {
+                        clientData = lst->data;
+                        da_shift(&(clientData->buffer), clientHeader.headerLength);
+                    } 
+                    else
+                        clientData = NULL;                    
+                }  while (clientData && clientData->buffer.size > 0);
             }  // if (events[n].data.fd != clientSock)
         }
     }
@@ -579,7 +596,7 @@ void prefetchImgTags(char *html, DataList **imageServers, int epollfd) {
             int imgSock = createServerSock(domainBuff, "80");
             (*imageServers) = addData(*imageServers, createServerData(imgSock, urlBuff));
 
-            printf("Adding Image Serv: %d - %s\n", imgSock, urlBuff);
+            // printf("Adding Image Serv: %d - %s\n", imgSock, urlBuff);
                                    
             write(imgSock, httpGetBuff, numChar);
 

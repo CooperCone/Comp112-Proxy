@@ -78,4 +78,5 @@ typedef struct DataList {
 
 DataList *addData(DataList *list, void *data);
 DataList *findData(DataList *list, bool (*cmp)(void *a, void *b), void *data);
+int dataListLength(DataList *list);
 DataList *deleteData(DataList *list, bool (*cmp)(void *a, void *b), void *data, void (*termData)(void *data));
