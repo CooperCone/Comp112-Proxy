@@ -59,3 +59,11 @@ Added in a lot of stability. Strtok caused a lot of problems with header
 parsing. Now, you can connect a browser to the proxy and it'll work reliably.
 Next step is to make cache bigger, and make it better. I'll try to add in
 content pre-fetching.
+
+-- ercprk (Dec 2nd 19:44)
+
+Added in the new implementation of age field addition. If there already is an
+age field when the response adds in, we apply the age by subtracting it from
+timeCreated in our cacheObj. For all writes back to the client, we add age field
+at the end of the header, no matter what (i.e. even when we send it right from
+the server).

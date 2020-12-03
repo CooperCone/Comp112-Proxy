@@ -15,4 +15,5 @@ typedef struct {
   int headerLength;
   bool chunkedEncoding;
   int contentLength;
+  time_t age;
 } Header;

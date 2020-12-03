@@ -24,6 +24,7 @@ int createServerSock(char* domain, char* port);
 bool parseHeader(Header* outHeader, DynamicArray* buff);
 int readBody(int sock, Header* header, DynamicArray* buffer);
 void socketError(char* funcName);
+ssize_t writeResponseWithAge(int writeSock, char *data, int headerSize, int dataSize, time_t age);
 /******************************************/
 
 #define MAX_EVENTS 100  // For epoll_wait()
@@ -177,8 +178,7 @@ int main(int argc, char** argv) {
                     time_t age = time(NULL) - record->timeCreated;
 
                     char* cur = record->data;
-                    write(clientConn, cur, strlen(cur));
-                    // writeResponseWithAge()
+                    writeResponseWithAge(clientConn, record->data, record->headerSize, record->dataSize, age);
 
                     record->lastAccess = time(NULL);
                     // close(clientConn);
@@ -240,7 +240,7 @@ int main(int argc, char** argv) {
 
                             cache_add(&clientHeader, &serverHeader, responseSize, &reqBuff, cache);
 
-                            write(clientConn, reqBuff.buff, reqBuff.size);
+                            writeResponseWithAge(clientConn, reqBuff.buff, serverHeader.headerLength, reqBuff.size, serverHeader.age);
 
                             da_clear(&reqBuff);
                             // printf("Buffer Size %d - Amount %d\n", clientData->buffer.size, clientHeader.headerLength);
@@ -346,6 +346,7 @@ int createServerSock(char* domain, char* port) {
 bool parseHeader(Header* outHeader, DynamicArray* buff) {
     outHeader->contentLength = -1;
     outHeader->chunkedEncoding = false;
+    outHeader->age = 0;
     int headerLen = 0;
 
     const char delim[] = "\r";
@@ -414,6 +415,32 @@ bool parseHeader(Header* outHeader, DynamicArray* buff) {
 
             int contentLength = atoi(start);
             outHeader->contentLength = contentLength;
+        }
+
+        char *ageStr = strstr(line, "Age: ");
+        if (ageStr != NULL && ageStr - line <= lineLen) {
+            // If the age field is already here, we remove it. This reduces the
+            // cost of re-iterating through the header to find the age field
+            // again, when we send the response
+
+            // Log size
+            char *start = strstr(line, ":") + 2;
+            int age = atoi(start);
+            outHeader->age = age;
+
+            // Remove age field
+            memcpy(line, line + lineLen + 2, buff->size - headerLen);
+
+            // Update lengths
+            headerLen -= (lineLen + 2);
+            int oldSize = buff->size;
+            buff->size -= (lineLen + 2);
+
+            // Clean the tailing data
+            for (int i = buff->size; i < oldSize; ++i)
+            {
+                buff->buff[i] = 0; // null
+            }
         }
         
         if (outHeader->chunkedEncoding && atoi(line) != 0) {
@@ -511,6 +538,37 @@ int readBody(int sock, Header* header, DynamicArray* buffer) {
 void socketError(char* funcName) {
     fprintf(stderr, "%s Error: %s\n", funcName, strerror(errno));
     fprintf(stderr, "Exiting\n");
+}
+
+ssize_t writeResponseWithAge(int writeSock, char *data, int headerSize, int dataSize, time_t age) {
+    char *response;
+    char ageStr[256];
+    char ageField[6] = "Age: ";
+    char lineDelim[3] = "\r\n";
+    size_t ageStrLen, ageLineLen;
+    size_t offset;
+    ssize_t retval;
+
+    // Create age string
+    sprintf(ageStr, "%ld", age);
+    ageLineLen = strlen(ageField) + strlen(ageStr) + strlen(lineDelim);
+
+    // Make a new response with the age field
+    offset = 0;
+    response = malloc(dataSize + ageLineLen);
+    memcpy(response + offset, data, headerSize);
+    offset += headerSize;
+    memcpy(response + offset, ageField, strlen(ageField));
+    offset += strlen(ageField);
+    memcpy(response + offset, ageStr, strlen(ageStr));
+    offset += strlen(ageStr);
+    memcpy(response + offset, lineDelim, strlen(lineDelim));
+    offset += strlen(lineDelim);
+    memcpy(response + offset, data + headerSize, dataSize - headerSize);
+
+    // Write to the socket
+    retval = write(writeSock, response, dataSize + ageLineLen);
+    return retval;
 }
 /****************************************************/
 

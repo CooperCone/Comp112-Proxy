@@ -13,7 +13,7 @@ void cache_add(Header* clientHeader, Header* servHeader, int dataSize, DynamicAr
 
   CacheObj* obj = malloc(sizeof(CacheObj));
   obj->data = data;
-  obj->timeCreated = time(NULL);
+  obj->timeCreated = time(NULL) - servHeader->age; // Apply the age that was already in, into our own cache
   obj->timeToLive = servHeader->timeToLive;  // TODO: Change this to real time to live
   obj->lastAccess = -1;
   obj->headerSize = servHeader->headerLength;
