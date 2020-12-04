@@ -41,7 +41,7 @@ int main(int argc, char **argv) {
 
     // Caching and filtering
     HashTable *cache;
-    BloomFilter *bf;
+    BloomFilter *oneHitBloom; // a set of URLs that had at least one hit
 
     // Client-side communication
     int clientSock, clientConn;
@@ -68,7 +68,7 @@ int main(int argc, char **argv) {
     da_init(&reqBuff, 2048);
     cache = malloc(sizeof(HashTable));
     ht_init(cache, 10, keyHash, keyCmp, termCacheObj);
-    bf = bf_create();
+    oneHitBloom = bf_create();
 
     // Create socket for client-side communication
     if ((clientSock = createClientSock(argv[1])) == -1)
@@ -277,7 +277,12 @@ int main(int argc, char **argv) {
                                 prefetchImgTags(reqBuff.buff, &imageServers, epollfd);
 
                             clientHeader.timeToLive = 60;
-                            cache_add(&clientHeader, &serverHeader, responseSize, &reqBuff, cache);
+
+                            // Add to cache only when the URL has been through at least once
+                            if (bf_query(oneHitBloom, clientHeader.url))
+                                cache_add(&clientHeader, &serverHeader, responseSize, &reqBuff, cache);
+                            else
+                                bf_add(oneHitBloom, clientHeader.url);
 
                             writeResponseWithAge(clientConn, reqBuff.buff, serverHeader.headerLength, reqBuff.size, serverHeader.age);
 
@@ -310,13 +315,13 @@ int main(int argc, char **argv) {
                     } 
                     else
                         clientData = NULL;
-                }  while (clientData && clientData->buffer.size > 0);
+                } while (clientData && clientData->buffer.size > 0);
             }  // if (events[n].data.fd != clientSock)
         } // for (n = 0; n < nfds; ++n)
     } // for (;;)
     // terminate buffers and free memory
     free(cache); // TODO: I think this should be ht_term
-    bf_delete(bf);
+    bf_delete(oneHitBloom);
     da_term(&reqBuff);
     close(clientSock);
     close(epollfd);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdlib.h>
+#include <stdbool.h>
 
 #define bf_k 7       // number of hash functions
 #define bf_m 2000000 // size of the bit array
@@ -12,5 +13,6 @@ typedef struct BloomFilter {
 
 BloomFilter *bf_create();
 void bf_add(BloomFilter *bf, char *str);
+bool bf_query(BloomFilter *bf, char *str);
 void bf_delete(BloomFilter *bf);
 

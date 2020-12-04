@@ -84,3 +84,10 @@ structs that were all linked lists with some data attached. They had different
 implementations of add, remove, find, and length. I changed this to 1 DataList
 struct that stores a void* data field. Now the other structs only need to
 handle creating and destroying themselves and comparison functions.
+
+-- ercprk (Dec 4th 02:12)
+
+Implemented a simple bloom filter for URLs that are one-hitters. It's a separate
+data structure from our cache, so before the cache_add we simply check the bloom
+filter if it has been through before. This would barely do anything as of now,
+since we barely use our cache.
