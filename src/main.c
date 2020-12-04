@@ -18,6 +18,7 @@
 #include "cache.h"
 #include "dynamicArray.h"
 #include "httpData.h"
+#include "bloomFilter.h"
 
 /************ Proxy Helpers ************/
 int createClientSock(const char* port);
@@ -32,15 +33,26 @@ ssize_t writeResponseWithAge(int writeSock, char *data, int headerSize, int data
 #define MAX_EVENTS 100  // For epoll_wait()
 
 int main(int argc, char **argv) {
+    // For epoll
     int epollfd;
     struct epoll_event ev;                  // epoll_ctl()
     struct epoll_event events[MAX_EVENTS];  // epoll_wait()
     int nfds;
 
+    // Caching and filtering
+    HashTable *cache;
+    BloomFilter *bf;
+
+    // Client-side communication
+    int clientSock, clientConn;
+
+    // Server-side communication
+    DynamicArray reqBuff;
+
+    // DataLists
     DataList *connections = NULL; // ConnectionData
     DataList *clients = NULL; // ClientData
     DataList *servers = NULL; // ServerData
-
     DataList *images = NULL; // PrefetchData
     DataList *imageServers = NULL; // ServerData
 
@@ -52,14 +64,13 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    int clientSock, clientConn;
-
-    DynamicArray reqBuff;
+    // Data structures initialization
     da_init(&reqBuff, 2048);
-
-    HashTable *cache = malloc(sizeof(HashTable));
+    cache = malloc(sizeof(HashTable));
     ht_init(cache, 10, keyHash, keyCmp, termCacheObj);
+    bf = bf_create();
 
+    // Create socket for client-side communication
     if ((clientSock = createClientSock(argv[1])) == -1)
         return 1;
 
@@ -87,7 +98,7 @@ int main(int argc, char **argv) {
         }
 
         for (int n = 0; n < nfds; ++n) {
-            if (events[n].data.fd == clientSock) {
+            if (events[n].data.fd == clientSock) { // Connection request from a client
                 // Initialize Client Connection
                 struct sockaddr_in connAddr;
                 socklen_t connSize = sizeof(struct sockaddr_in);
@@ -112,7 +123,7 @@ int main(int argc, char **argv) {
                 if (epoll_ctl(epollfd, EPOLL_CTL_ADD, clientConn, &ev) == -1) {
                     fprintf(stderr, "Error on epoll_ctl() on clientConn\n");
                 }
-            } else {
+            } else { // HTTP request from a client
                 clientConn = events[n].data.fd;
 
                 // First check to see if it's an active connection
@@ -132,7 +143,6 @@ int main(int argc, char **argv) {
                     da_clear(&(connData->buffer));
                     continue;
                 }
-
 
                 DataList *imgServDl = findData(imageServers, (CmpFunc)servSockCmp, &clientConn);
                 if (imgServDl != NULL) {
@@ -299,14 +309,14 @@ int main(int argc, char **argv) {
                         da_shift(&(clientData->buffer), clientHeader.headerLength);
                     } 
                     else
-                        clientData = NULL;                    
+                        clientData = NULL;
                 }  while (clientData && clientData->buffer.size > 0);
             }  // if (events[n].data.fd != clientSock)
         } // for (n = 0; n < nfds; ++n)
     } // for (;;)
     // terminate buffers and free memory
     free(cache); // TODO: I think this should be ht_term
-
+    bf_delete(bf);
     da_term(&reqBuff);
     close(clientSock);
     close(epollfd);
