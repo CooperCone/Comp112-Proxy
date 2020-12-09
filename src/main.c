@@ -14,7 +14,6 @@
 #include <time.h>
 #include <unistd.h>
 
-// #include "compression.h"
 #include "cache.h"
 #include "dynamicArray.h"
 #include "httpData.h"
@@ -190,7 +189,7 @@ int main(int argc, char **argv) {
                     DataList *imgDl = findData(images, (CmpFunc)prefetchUrlCmp, clientHeader.url);
                     if (imgDl) {
                         PrefetchData *imgData = imgDl->data;
-                        printf("Found Url in Prefetch Images\n\n");
+                        printf("Found Url in Prefetch Images of size %d\n\n", imgData->contentLen);
                         write(clientConn, imgData->content, imgData->contentLen);
                         
                         images = deleteData(images, (CmpFunc)prefetchUrlCmp, clientHeader.url, (TermFunc)termPrefetchData);
@@ -248,33 +247,37 @@ int main(int argc, char **argv) {
                                 write(serverSock, clientData->buffer.buff, clientHeader.headerLength);
                             }
 
-                            int servBytesRead = readAll(serverSock, &reqBuff);
-
-                            if (servBytesRead == 0)
-                                continue;
+                            int servBytesRead = 0;
+                            do {
+                                servBytesRead = readAll(serverSock, &reqBuff);
+                            } while (servBytesRead == 0);
 
                             Header serverHeader;
                             memset(&serverHeader, 0, sizeof(Header));
                             parseHeader(&serverHeader, &reqBuff);
 
-                            printf("Sending Data to client\n\n");
-
                             int responseSize = serverHeader.headerLength;
-                            int bodySize = readBody(serverSock, &serverHeader,
-                                                    &reqBuff);
+                            int bodySize = readBody(serverSock, &serverHeader, &reqBuff);
                             responseSize += bodySize;
 
                             // Search for IMG tags in html and pull them before client asks
                             // If data is compressed, we need to uncompress it
                             if (serverHeader.encoding == GZIP && serverHeader.contentLength > 0) {
+                                // printf("\nCompressed: \n");
+                                // write(1, reqBuff.buff + serverHeader.headerLength, 30);
                                 int uncompressSize = serverHeader.contentLength;
                                 char *uncompressed = malloc(sizeof(char) * uncompressSize);
                                 uncompressed = uncompressGzip(uncompressed, &uncompressSize, reqBuff.buff + serverHeader.headerLength, serverHeader.contentLength);
+                                // printf("\nUncompressed: \n\n");
+                                // write(1, uncompressed, 30);
+                                // printf("\n");
                                 prefetchImgTags(uncompressed, &imageServers, epollfd);
                                 free(uncompressed);
                             }
                             else
                                 prefetchImgTags(reqBuff.buff, &imageServers, epollfd);
+
+                            printf("Sending Data to client\n\n");
 
                             clientHeader.timeToLive = 60;
 
@@ -494,6 +497,7 @@ bool parseHeader(Header *outHeader, DynamicArray *buff) {
             {
                 buff->buff[i] = 0; // null
             }
+            line -= (lineLen + 2);
         }        
 
         char *encodingStr = strstr(line, "Content-Encoding: gzip");
@@ -572,8 +576,7 @@ int readBody(int sock, Header *header, DynamicArray *buffer) {
     if (!header->chunkedEncoding && header->contentLength != -1) {
         // I have no idea why we have to subtract 3 here. I thought it
         // would only be 2, but it didn't work unless it was 3
-        while (buffer->size <
-               (header->headerLength + header->contentLength - 3)) {
+        while (buffer->size < (header->headerLength + header->contentLength - 3)) {
             readAll(sock, buffer);
         }
         bodySize = header->contentLength - 2;
@@ -609,15 +612,15 @@ ssize_t writeResponseWithAge(int writeSock, char *data, int headerSize, int data
     // Make a new response with the age field
     offset = 0;
     response = malloc(dataSize + ageLineLen);
-    memcpy(response + offset, data, headerSize);
-    offset += headerSize;
+    memcpy(response + offset, data, headerSize - 2);
+    offset += (headerSize - 2);
     memcpy(response + offset, ageField, strlen(ageField));
     offset += strlen(ageField);
     memcpy(response + offset, ageStr, strlen(ageStr));
     offset += strlen(ageStr);
     memcpy(response + offset, lineDelim, strlen(lineDelim));
     offset += strlen(lineDelim);
-    memcpy(response + offset, data + headerSize, dataSize - headerSize);
+    memcpy(response + offset, data + headerSize - 2, dataSize - headerSize + 2);
 
     // Write to the socket
     retval = write(writeSock, response, dataSize + ageLineLen);
@@ -660,7 +663,7 @@ void prefetchImgTags(char *html, DataList **imageServers, int epollfd) {
             int imgSock = createServerSock(domainBuff, "80");
             (*imageServers) = addData(*imageServers, createServerData(imgSock, urlBuff));
 
-            // printf("Adding Image Serv: %d - %s\n", imgSock, urlBuff);
+            printf("Adding Image Serv: %d - %s\n", imgSock, urlBuff);
                                    
             write(imgSock, httpGetBuff, numChar);
 
