@@ -100,4 +100,5 @@ main). I had to remove the edge-triggering from our epoll, since we needed the
 epoll to keep nagging us if we skip reading from a socket because of
 rate-limiting. I've been running valgrind for errors and memory leaks and
 it looks like there're few errors coming from epoll_ctl. I agree that now is the
-time to stabilize our code.
+time to stabilize our code. I also need to empirically decide what a reasonable
+rate would be.
