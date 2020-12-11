@@ -102,3 +102,12 @@ rate-limiting. I've been running valgrind for errors and memory leaks and
 it looks like there're few errors coming from epoll_ctl. I agree that now is the
 time to stabilize our code. I also need to empirically decide what a reasonable
 rate would be.
+
+-- cooper (Dec 11th 14:48)
+
+Implemented content filtering. It uses a file called contentBlacklist.txt located 
+in res. Each blacklist needs to be separated by a \n, and the file needs to end with 
+a \n. It creates a Trie data structure from the blacklisted entries, then when we
+get an http document, it tries to match the trie to the html. If it finds a match,
+then it sends a content blocked message and closes the socket. This is the final
+feature that I'll be adding, so we can focus on stability and bugs.
