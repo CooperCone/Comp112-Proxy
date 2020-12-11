@@ -18,6 +18,7 @@
 #include "dynamicArray.h"
 #include "httpData.h"
 #include "bloomFilter.h"
+#include "tokenBucket.h"
 
 /************ Proxy Helpers ************/
 int createClientSock(const char* port);
@@ -30,6 +31,7 @@ ssize_t writeResponseWithAge(int writeSock, char *data, int headerSize, int data
 /******************************************/
 
 #define MAX_EVENTS 100  // For epoll_wait()
+#define BYTES_PER_TEN_SEC 5000 // For rate-limiting
 
 int main(int argc, char **argv) {
     // For epoll
@@ -38,9 +40,10 @@ int main(int argc, char **argv) {
     struct epoll_event events[MAX_EVENTS];  // epoll_wait()
     int nfds;
 
-    // Caching and filtering
+    // Caching, filtering, and rate-limiting
     HashTable *cache;
     BloomFilter *oneHitBloom; // a set of URLs that had at least one hit
+    TokenBuckets *rateLimitTB;
 
     // Client-side communication
     int clientSock, clientConn;
@@ -68,6 +71,7 @@ int main(int argc, char **argv) {
     cache = malloc(sizeof(HashTable));
     ht_init(cache, 10, keyHash, keyCmp, termCacheObj);
     oneHitBloom = bf_create();
+    rateLimitTB = tb_create(BYTES_PER_TEN_SEC);
 
     // Create socket for client-side communication
     if ((clientSock = createClientSock(argv[1])) == -1)
@@ -117,30 +121,36 @@ int main(int argc, char **argv) {
                 clients = addData(clients, createClientData(clientConn));
 
                 // Register the clientConn socket to the epoll instance
-                ev.events = EPOLLIN | EPOLLET;
+                ev.events = EPOLLIN; // | EPOLLET;
                 ev.data.fd = clientConn;
                 if (epoll_ctl(epollfd, EPOLL_CTL_ADD, clientConn, &ev) == -1) {
                     fprintf(stderr, "Error on epoll_ctl() on clientConn\n");
                 }
             } else { // HTTP request from a client
                 clientConn = events[n].data.fd;
-
+                //printf("clientConn: %d\n", clientConn);
                 // First check to see if it's an active connection
                 // If so, forward data between
                 DataList *connDl = findData(connections, (CmpFunc)connSockCmp, &clientConn);
                 if (connDl) {
                     ConnectionData *connData = connDl->data;
                     int otherSock = connData->first == clientConn ? connData->second : connData->first;
-                    int bytesRead = readAll(clientConn, &(connData->buffer));
+                    if (tb_ratelimit(rateLimitTB, clientConn)) {
+                        printf("Rate limited\n");
+                        continue;
+                    } else {
+                        int bytesRead = readAll(clientConn, &(connData->buffer));
+                        //printf("bytesRead: %d\n", bytesRead);
+                        if (bytesRead == -1) {
+                            printf("\n\n----------------------------------------------------------\n\n");
+                            // TODO: Close https connections
+                        }
 
-                    if (bytesRead == -1) {
-                        printf("\n\n----------------------------------------------------------\n\n");
-                        // TODO: Close https connections
+                        write(otherSock, connData->buffer.buff, connData->buffer.size);
+                        da_clear(&(connData->buffer));
+                        tb_update(rateLimitTB, clientConn, bytesRead);
+                        continue;
                     }
-
-                    write(otherSock, connData->buffer.buff, connData->buffer.size);
-                    da_clear(&(connData->buffer));
-                    continue;
                 }
 
                 DataList *imgServDl = findData(imageServers, (CmpFunc)servSockCmp, &clientConn);
@@ -299,7 +309,7 @@ int main(int argc, char **argv) {
                             clients = deleteData(clients, (CmpFunc)clientSockCmp, &clientConn, (TermFunc)termClientData);
                             connections = addData(connections, createConnectionData(clientConn, serverSock));
 
-                            ev.events = EPOLLIN | EPOLLET;
+                            ev.events = EPOLLIN; // | EPOLLET;
                             ev.data.fd = serverSock;
                             if (epoll_ctl(epollfd, EPOLL_CTL_ADD, serverSock, &ev) == -1) {
                                 fprintf(stderr, "Error on epoll_ctl() on serverSock: %s\n", strerror(errno));
@@ -325,6 +335,7 @@ int main(int argc, char **argv) {
     // terminate buffers and free memory
     free(cache); // TODO: I think this should be ht_term
     bf_delete(oneHitBloom);
+    tb_delete(rateLimitTB);
     da_term(&reqBuff);
     close(clientSock);
     close(epollfd);
@@ -673,7 +684,7 @@ void prefetchImgTags(char *html, DataList **imageServers, int epollfd) {
             }
 
             struct epoll_event ev;
-            ev.events = EPOLLIN | EPOLLET;
+            ev.events = EPOLLIN; // | EPOLLET;
             ev.data.fd = imgSock;
             if (epoll_ctl(epollfd, EPOLL_CTL_ADD, imgSock, &ev) == -1) {
                 fprintf(stderr, "Error on epoll_ctl() on imgSock: %s\n", strerror(errno));

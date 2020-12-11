@@ -91,3 +91,13 @@ Implemented a simple bloom filter for URLs that are one-hitters. It's a separate
 data structure from our cache, so before the cache_add we simply check the bloom
 filter if it has been through before. This would barely do anything as of now,
 since we barely use our cache.
+
+-- ercprk (Dec 11th 14:25)
+
+Implemented rate limiting. It uses a simple token bucket algorithm and for now,
+it limits each socket read to 5000 bytes/10 sec (defined by #define directive in
+main). I had to remove the edge-triggering from our epoll, since we needed the
+epoll to keep nagging us if we skip reading from a socket because of
+rate-limiting. I've been running valgrind for errors and memory leaks and
+it looks like there're few errors coming from epoll_ctl. I agree that now is the
+time to stabilize our code.
