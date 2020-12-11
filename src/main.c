@@ -18,6 +18,7 @@
 #include "dynamicArray.h"
 #include "httpData.h"
 #include "bloomFilter.h"
+#include "contentFilter.h"
 
 /************ Proxy Helpers ************/
 int createClientSock(const char* port);
@@ -27,6 +28,8 @@ int readBody(int sock, Header* header, DynamicArray* buffer);
 void prefetchImgTags(char *html, DataList **imageServers, int epollfd);
 void socketError(char* funcName);
 ssize_t writeResponseWithAge(int writeSock, char *data, int headerSize, int dataSize, time_t age);
+char *getErrorHTML();
+void getBlockedHttp(char *out, char *html);
 /******************************************/
 
 #define MAX_EVENTS 100  // For epoll_wait()
@@ -39,6 +42,7 @@ int main(int argc, char **argv) {
     int nfds;
 
     // Caching and filtering
+    ContentFilter *filter;
     HashTable *cache;
     BloomFilter *oneHitBloom; // a set of URLs that had at least one hit
 
@@ -65,6 +69,7 @@ int main(int argc, char **argv) {
 
     // Data structures initialization
     da_init(&reqBuff, 2048);
+    filter = cf_create("res/contentBlacklist.txt");
     cache = malloc(sizeof(HashTable));
     ht_init(cache, 10, keyHash, keyCmp, termCacheObj);
     oneHitBloom = bf_create();
@@ -260,6 +265,8 @@ int main(int argc, char **argv) {
                             int bodySize = readBody(serverSock, &serverHeader, &reqBuff);
                             responseSize += bodySize;
 
+                            bool foundBadContent = false;
+
                             // Search for IMG tags in html and pull them before client asks
                             // If data is compressed, we need to uncompress it
                             if (serverHeader.encoding == GZIP && serverHeader.contentLength > 0) {
@@ -271,11 +278,33 @@ int main(int argc, char **argv) {
                                 // printf("\nUncompressed: \n\n");
                                 // write(1, uncompressed, 30);
                                 // printf("\n");
-                                prefetchImgTags(uncompressed, &imageServers, epollfd);
+
+                                foundBadContent = cf_searchText(filter, uncompressed, uncompressSize);
+                                
+                                if (!foundBadContent)
+                                    prefetchImgTags(uncompressed, &imageServers, epollfd);
+                                
                                 free(uncompressed);
                             }
-                            else
-                                prefetchImgTags(reqBuff.buff, &imageServers, epollfd);
+                            else {
+                                char *bodyStart = reqBuff.buff + serverHeader.headerLength;
+                                int length = reqBuff.size - serverHeader.headerLength;
+                                foundBadContent = cf_searchText(filter, bodyStart, length);
+
+                                if (!foundBadContent)
+                                    prefetchImgTags(reqBuff.buff, &imageServers, epollfd);
+                            }
+
+                            char blacklistText[512];
+                            getBlockedHttp(blacklistText, getErrorHTML());
+                            if (foundBadContent) {
+                                write(clientConn, blacklistText, strlen(blacklistText));
+                                if (epoll_ctl(epollfd, EPOLL_CTL_DEL, clientConn, NULL) == -1) {
+                                    fprintf(stderr, "Error on epoll_ctl() delete on clientConn %s\n", strerror(errno));
+                                }
+                                close(clientConn);
+                                break;
+                            }
 
                             printf("Sending Data to client\n\n");
 
@@ -322,8 +351,10 @@ int main(int argc, char **argv) {
             }  // if (events[n].data.fd != clientSock)
         } // for (n = 0; n < nfds; ++n)
     } // for (;;)
+
     // terminate buffers and free memory
-    free(cache); // TODO: I think this should be ht_term
+    cf_delete(filter);
+    ht_term(cache);
     bf_delete(oneHitBloom);
     da_term(&reqBuff);
     close(clientSock);
@@ -688,4 +719,43 @@ void socketError(char *funcName) {
     fprintf(stderr, "%s Error: %s\n", funcName, strerror(errno));
     fprintf(stderr, "Exiting\n");
 }
+
+char *getErrorHTML() {
+    static char blockedHtml[] =
+    "<!DOCTYPE html>"
+    "<html lang=\"en\">"
+      "<head>"
+        "<title>Test</title>"
+        "<style>"
+          "div {"
+            "text-align: center;"
+            "position: absolute;"
+            "top: 20%;"
+            "left: 50%;"
+            "transform: translate(-50%, -50%);"
+          "}"
+        "</style>"
+      "</head>"
+      "<body>"
+        "<div>"
+          "<h1>Content Blocked</h1>"
+          "<p>This page is blocked by your proxy's blacklist</p>"
+        "</div>"
+      "</body>"
+    "</html>";
+    return blockedHtml;
+}
+
+void getBlockedHttp(char *out, char *html) {
+    static char blockHttp[] =
+        "HTTP/1.1 403 Forbidden\r\n"
+        "Connection: close\r\n"
+        "Content-Length: %d\r\n"
+        "Content-Type: text/html; charset=UTF-8\r\n"
+        "\r\n"
+        "%s";
+    
+    sprintf(out, blockHttp, strlen(html), html);
+}
+
 /****************************************************/
