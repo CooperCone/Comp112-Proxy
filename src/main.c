@@ -141,7 +141,7 @@ int main(int argc, char **argv) {
                     ConnectionData *connData = connDl->data;
                     int otherSock = connData->first == clientConn ? connData->second : connData->first;
                     if (tb_ratelimit(rateLimitTB, clientConn)) {
-                        printf("Rate limited\n");
+                        // printf("Rate limited\n");
                         continue;
                     } else {
                         int bytesRead = readAll(clientConn, &(connData->buffer));
@@ -184,6 +184,9 @@ int main(int argc, char **argv) {
                 // This can throw an error if clients doesn't contain clientConn
                 ClientData *clientData = findData(clients, (CmpFunc)clientSockCmp, &clientConn)->data;
                 int bytesRead = readAll(clientConn, &(clientData->buffer));
+
+                if (bytesRead == 0)
+                    continue;
 
                 Header clientHeader;
                 parseHeader(&clientHeader, &(clientData->buffer));
@@ -246,7 +249,7 @@ int main(int argc, char **argv) {
                         servers = addData(servers, createServerData(serverSock, clientHeader.domain));
                         servDl = servers;
                     }
-                    ServerData *servData = servDl->data;
+                    ServerData *servData = servDl->data;                    
 
                     // Connection successful
                     switch (clientHeader.method) {
@@ -271,7 +274,10 @@ int main(int argc, char **argv) {
                             memset(&serverHeader, 0, sizeof(Header));
                             parseHeader(&serverHeader, &reqBuff);
 
+                            serverHeader.timeToLive = 7200;
+
                             int responseSize = serverHeader.headerLength;
+
                             int bodySize = readBody(serverSock, &serverHeader, &reqBuff);
                             responseSize += bodySize;
 
@@ -283,8 +289,10 @@ int main(int argc, char **argv) {
                                 // printf("\nCompressed: \n");
                                 // write(1, reqBuff.buff + serverHeader.headerLength, 30);
                                 int uncompressSize = serverHeader.contentLength;
+                                // printf("Uncom size: %d\n", uncompressSize);
                                 char *uncompressed = malloc(sizeof(char) * uncompressSize);
                                 uncompressed = uncompressGzip(uncompressed, &uncompressSize, reqBuff.buff + serverHeader.headerLength, serverHeader.contentLength);
+                                // printf("Uncom size: %d\n", uncompressSize);
                                 // printf("\nUncompressed: \n\n");
                                 // write(1, uncompressed, 30);
                                 // printf("\n");
@@ -305,14 +313,16 @@ int main(int argc, char **argv) {
                                     prefetchImgTags(reqBuff.buff, &imageServers, epollfd);
                             }
 
-                            char blacklistText[512];
-                            getBlockedHttp(blacklistText, getErrorHTML());
                             if (foundBadContent) {
+                                // printf("Found Blocked Content\n");
+                                char blacklistText[512];
+                                getBlockedHttp(blacklistText, getErrorHTML());
                                 write(clientConn, blacklistText, strlen(blacklistText));
                                 if (epoll_ctl(epollfd, EPOLL_CTL_DEL, clientConn, NULL) == -1) {
                                     fprintf(stderr, "Error on epoll_ctl() delete on clientConn %s\n", strerror(errno));
                                 }
                                 close(clientConn);
+                                da_clear(&reqBuff);
                                 break;
                             }
 
@@ -705,8 +715,6 @@ void prefetchImgTags(char *html, DataList **imageServers, int epollfd) {
             int imgSock = createServerSock(domainBuff, "80");
             (*imageServers) = addData(*imageServers, createServerData(imgSock, urlBuff));
 
-            printf("Adding Image Serv: %d - %s\n", imgSock, urlBuff);
-                                   
             write(imgSock, httpGetBuff, numChar);
 
             if (fcntl(imgSock, F_SETFL,
