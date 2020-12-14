@@ -13,7 +13,7 @@ typedef struct TokenBucket {
 typedef struct TokenBuckets {
     TokenBucket *ray; // mapping from socket number to a token bucket
     size_t size;
-    size_t tokensPerTenSeconds;
+    size_t tokensPerMin;
 } TokenBuckets;
 
 TokenBuckets *tb_create(size_t rate);

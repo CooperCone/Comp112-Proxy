@@ -11,11 +11,11 @@ TokenBuckets *tb_create(size_t rate /* in tokens (bytes) per minute */) {
     tb = malloc(sizeof(TokenBuckets));
     tb->ray = malloc(sizeof(TokenBucket) * initial_size);
     tb->size = initial_size;
-    tb->tokensPerTenSeconds = rate;
+    tb->tokensPerMin = rate;
 
     for (size_t i = 0; i < initial_size; ++i) {
         tb->ray[i].timestamp = time(NULL);
-        tb->ray[i].tokens = tb->tokensPerTenSeconds;
+        tb->ray[i].tokens = tb->tokensPerMin/20;
     }
 
     return tb;
@@ -28,8 +28,8 @@ bool tb_ratelimit(TokenBuckets *tb, int idx) {
     }
 
     // Replenishment check
-    if (tb->ray[idx].timestamp + (time_t)10 < time(NULL)) {
-        tb->ray[idx].tokens = tb->tokensPerTenSeconds;
+    if (tb->ray[idx].timestamp + (time_t)3 < time(NULL)) {
+        tb->ray[idx].tokens = tb->tokensPerMin/20;
     }
 
     return (tb->ray[idx].tokens == 0);
@@ -42,8 +42,8 @@ void tb_update(TokenBuckets *tb, int idx, size_t usedTokens) {
     }
 
     // Replenishment check
-    if (tb->ray[idx].timestamp + (time_t)10 < time(NULL)) {
-        tb->ray[idx].tokens = tb->tokensPerTenSeconds;
+    if (tb->ray[idx].timestamp + (time_t)3 < time(NULL)) {
+        tb->ray[idx].tokens = tb->tokensPerMin/20;
     }
 
     if (tb->ray[idx].tokens > usedTokens) {
@@ -70,7 +70,7 @@ void tb_expand(TokenBuckets *tb, int targetidx) {
 
     tb->ray = realloc(tb->ray, sizeof(TokenBucket) * tb->size);
     for (size_t i = oldsize; i < tb->size; ++i) {
-        tb->ray[i].tokens = tb->tokensPerTenSeconds;
+        tb->ray[i].tokens = tb->tokensPerMin/20;
         tb->ray[i].timestamp = time(NULL);
     }
 }

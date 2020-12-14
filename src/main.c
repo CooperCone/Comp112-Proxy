@@ -34,7 +34,7 @@ void getBlockedHttp(char *out, char *html);
 /******************************************/
 
 #define MAX_EVENTS 100  // For epoll_wait()
-#define BYTES_PER_TEN_SEC 5000 // For rate-limiting
+#define BYTES_PER_MIN 40000 // For rate-limiting
 
 int main(int argc, char **argv) {
     // For epoll
@@ -76,7 +76,7 @@ int main(int argc, char **argv) {
     cache = malloc(sizeof(HashTable));
     ht_init(cache, 10, keyHash, keyCmp, termCacheObj);
     oneHitBloom = bf_create();
-    rateLimitTB = tb_create(BYTES_PER_TEN_SEC);
+    rateLimitTB = tb_create(BYTES_PER_MIN);
 
     // Create socket for client-side communication
     if ((clientSock = createClientSock(argv[1])) == -1)
