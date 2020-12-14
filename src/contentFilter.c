@@ -66,15 +66,14 @@ bool cf_searchText(ContentFilter *filter, char *text, int size) {
     char delims[] = " <>";
     char *token = strtok(bodyCopy, delims);
     while (token != NULL) {
-        // printf("Token: %s\n", token);
         if (cf_searchString(filter, token)) {
             return true;
-            // printf("Found String: %s\n", token);
         }
 
         token = strtok(NULL, delims);
     }
     free(bodyCopy);
+    return false;
 }
 
 
